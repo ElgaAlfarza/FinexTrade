@@ -91,7 +91,7 @@ def set_session_reset(reset_time: Optional[float] = None, initial_balance: Optio
                     shutil.copy2(TRADE_RECORDS_JSONL, TRADE_RECORDS_ARCHIVE_JSONL)
 
             # Reset file transaksi sesi saat ini (kosongkan dengan header)
-            fieldnames = ["ticket", "symbol", "side", "lots", "open_price", "close_price", "pnl", "source", "reason", "open_time", "close_time"]
+            fieldnames = ["ticket", "symbol", "side", "lots", "open_price", "close_price", "pnl", "source", "reason", "technique", "open_time", "close_time"]
             with open(TRADE_RECORDS_CSV, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
@@ -139,8 +139,77 @@ def extract_techniques_from_trade(trade: dict) -> List[str]:
     return ["EMA_TREND"]
 
 
+def save_trade_to_db(trade: dict, db_path: Optional[str] = None) -> None:
+    """Simpan atau perbarui riwayat transaksi tunggal ke SQLite database."""
+    if not trade:
+        return
+    db = db_path or os.path.join(os.path.dirname(__file__), "data", "bot_state.db")
+    try:
+        os.makedirs(os.path.dirname(db), exist_ok=True)
+        with sqlite3.connect(db) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    ticket INTEGER PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    lots REAL NOT NULL,
+                    open_price REAL NOT NULL,
+                    close_price REAL NOT NULL,
+                    sl REAL,
+                    tp REAL,
+                    pnl REAL NOT NULL,
+                    r REAL,
+                    source TEXT,
+                    reason TEXT,
+                    technique TEXT,
+                    open_time TEXT,
+                    close_time TEXT,
+                    commission REAL DEFAULT 0.0,
+                    swap REAL DEFAULT 0.0,
+                    created_at TEXT
+                )
+            """)
+            tk_raw = trade.get("ticket", 0)
+            try:
+                tk = int(tk_raw)
+            except Exception:
+                tk = 0
+            if tk <= 0:
+                return
+            sym = str(trade.get("symbol", "XAUUSD")).upper()
+            side = str(trade.get("side", "BUY")).upper()
+            lots = float(trade.get("lots", 0.01) or 0.01)
+            op = float(trade.get("open_price", 0.0) or 0.0)
+            cp = float(trade.get("close_price", 0.0) or 0.0)
+            sl_val = trade.get("sl")
+            sl = float(sl_val) if sl_val is not None and str(sl_val).strip() != "" else None
+            tp_val = trade.get("tp")
+            tp = float(tp_val) if tp_val is not None and str(tp_val).strip() != "" else None
+            pnl = float(trade.get("pnl", 0.0) or 0.0)
+            r_val = trade.get("r")
+            r = float(r_val) if r_val is not None and str(r_val).strip() != "" else None
+            source = str(trade.get("source", "BOT"))
+            reason = str(trade.get("reason", ""))
+            tech = str(trade.get("technique") or infer_technique_from_text(f"{trade.get('comment', '')} {reason}"))
+            ot = str(trade.get("open_time", ""))
+            ct = str(trade.get("close_time", ""))
+            comm = float(trade.get("commission", 0.0) or 0.0)
+            swap = float(trade.get("swap", 0.0) or 0.0)
+            now_iso = datetime.now(timezone.utc).isoformat()
+            conn.execute("""
+                INSERT OR REPLACE INTO trades (
+                    ticket, symbol, side, lots, open_price, close_price,
+                    sl, tp, pnl, r, source, reason, technique,
+                    open_time, close_time, commission, swap, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (tk, sym, side, lots, op, cp, sl, tp, pnl, r, source, reason, tech, ot, ct, comm, swap, now_iso))
+            conn.commit()
+    except Exception as e:
+        logger.debug(f"Gagal simpan trade ke DB: {e}")
+
+
 def save_trade_record(trade: dict) -> None:
-    """Mencatat transaksi ke file CSV & JSONL permanen (baik yang dieksekusi bot maupun manual)."""
+    """Mencatat transaksi ke file CSV & JSONL permanen serta SQLite trades."""
     if not trade:
         return
     with _trade_records_lock:
@@ -173,12 +242,13 @@ def save_trade_record(trade: dict) -> None:
                 with open(TRADE_RECORDS_JSONL, "a", encoding="utf-8") as f_json:
                     f_json.write(json.dumps(trade, ensure_ascii=False) + "\n")
                 logger.info(f"[RECORDER] Trade #{ticket_str} ({trade.get('source', 'TRADE')} / {row.get('technique')}) dicatat ke {TRADE_RECORDS_CSV}")
+            save_trade_to_db(trade)
         except Exception as e:
             logger.warning(f"[RECORDER] Gagal mencatat trade ke file: {e}")
 
 
 def sync_trade_records_to_file(trades: List[dict]) -> None:
-    """Sinkronisasi batch seluruh riwayat trade (MT5 / Paper) ke file CSV & JSONL tanpa duplikasi."""
+    """Sinkronisasi batch seluruh riwayat trade (MT5 / Paper) ke file CSV, JSONL, & SQLite tanpa duplikasi."""
     if not trades:
         return
     with _trade_records_lock:
@@ -209,6 +279,7 @@ def sync_trade_records_to_file(trades: List[dict]) -> None:
                         row["technique"] = infer_technique_from_text(f"{t.get('comment', '')} {t.get('reason', '')}")
                     new_rows.append(row)
                     new_json_lines.append(json.dumps(t, ensure_ascii=False))
+                    save_trade_to_db(t)
 
             if new_rows:
                 with open(TRADE_RECORDS_CSV, "a" if file_exists else "w", newline="", encoding="utf-8") as f:
@@ -308,7 +379,7 @@ class IExecutor:
 
 
 class PaperExecutor(IExecutor):
-    """Simulator Paper Trading independen."""
+    """Simulator Paper Trading independen (thread-safe + unique non-colliding tickets)."""
 
     def get_required_margin(self, symbol: str, side: str, lots: float, price: float = 0.0) -> float:
         contract = 100.0 if "XAU" in symbol or "GOLD" in symbol else 100000.0
@@ -316,186 +387,202 @@ class PaperExecutor(IExecutor):
         return round((float(lots) * contract * px) / 500.0, 2)
 
     def __init__(self, initial_balance: float = 10000.0, currency: str = "USD"):
+        self._lock = threading.RLock()
+        self._ticket_counter: int = 0
         self.balance: float = initial_balance
         self.equity: float = initial_balance
         self.currency: str = currency
         self.positions: Dict[int, Position] = {}
         self.trade_history: List[dict] = []
-        self._next_ticket: int = 100001
         self.latest_prices: Dict[str, dict] = {} # {symbol: {bid, ask, time}}
         self.daily_start_balance: float = initial_balance
         self.monthly_start_balance: float = initial_balance
         self.last_day = datetime.now(timezone.utc).date()
         self.last_month = datetime.now(timezone.utc).month
 
+    def _generate_ticket(self) -> int:
+        """Hasilkan ID tiket transaksi yang dijamin unik dan tidak bertabrakan."""
+        with self._lock:
+            self._ticket_counter = (self._ticket_counter + 1) % 10000
+            now_ms = int(time.time() * 1000)
+            return (now_ms % 1000000000) * 10000 + self._ticket_counter
+
     def get_account_info(self) -> dict:
-        floating = sum(p.floating_pnl for p in self.positions.values())
-        self.equity = round(self.balance + floating, 2)
-        margin_used = sum(p.lots * 1000.0 for p in self.positions.values()) # est margin 1:100
+        with self._lock:
+            floating = sum(p.floating_pnl for p in self.positions.values())
+            self.equity = round(self.balance + floating, 2)
+            margin_used = sum(p.lots * 1000.0 for p in self.positions.values()) # est margin 1:100
 
-        now_dt = datetime.now(timezone.utc)
-        today_str = now_dt.strftime("%Y-%m-%d")
-        month_str = now_dt.strftime("%Y-%m")
-        if now_dt.date() != self.last_day or self.daily_start_balance <= 0:
-            self.daily_start_balance = self.balance
-            self.last_day = now_dt.date()
-        if now_dt.month != self.last_month or self.monthly_start_balance <= 0:
-            self.monthly_start_balance = self.balance
-            self.last_month = now_dt.month
+            now_dt = datetime.now(timezone.utc)
+            today_str = now_dt.strftime("%Y-%m-%d")
+            month_str = now_dt.strftime("%Y-%m")
+            if now_dt.date() != self.last_day or self.daily_start_balance <= 0:
+                self.daily_start_balance = self.balance
+                self.last_day = now_dt.date()
+            if now_dt.month != self.last_month or self.monthly_start_balance <= 0:
+                self.monthly_start_balance = self.balance
+                self.last_month = now_dt.month
 
-        reset_info = get_session_reset_info()
-        reset_epoch = float(reset_info.get("reset_time", 0))
+            reset_info = get_session_reset_info()
+            reset_epoch = float(reset_info.get("reset_time", 0))
 
-        realized_today = sum(t.get("pnl", 0) for t in self.trade_history if t.get("close_time", "").startswith(today_str) and (reset_epoch <= 0 or t.get("close_epoch", 0) >= reset_epoch))
-        realized_month = sum(t.get("pnl", 0) for t in self.trade_history if t.get("close_time", "").startswith(month_str) and (reset_epoch <= 0 or t.get("close_epoch", 0) >= reset_epoch))
-        profit_today = round(realized_today + floating, 2)
-        profit_today_pct = round((profit_today / self.daily_start_balance) * 100, 2) if self.daily_start_balance > 0 else 0.0
-        profit_month = round(realized_month + floating, 2)
-        profit_month_pct = round((profit_month / self.monthly_start_balance) * 100, 2) if self.monthly_start_balance > 0 else 0.0
-        est_balance_tomorrow = round(self.balance + floating, 2)
+            realized_today = sum(t.get("pnl", 0) for t in self.trade_history if t.get("close_time", "").startswith(today_str) and (reset_epoch <= 0 or t.get("close_epoch", 0) >= reset_epoch))
+            realized_month = sum(t.get("pnl", 0) for t in self.trade_history if t.get("close_time", "").startswith(month_str) and (reset_epoch <= 0 or t.get("close_epoch", 0) >= reset_epoch))
+            profit_today = round(realized_today + floating, 2)
+            profit_today_pct = round((profit_today / self.daily_start_balance) * 100, 2) if self.daily_start_balance > 0 else 0.0
+            profit_month = round(realized_month + floating, 2)
+            profit_month_pct = round((profit_month / self.monthly_start_balance) * 100, 2) if self.monthly_start_balance > 0 else 0.0
+            est_balance_tomorrow = round(self.balance + floating, 2)
 
-        return {
-            "mode": "PAPER",
-            "connected": True,
-            "login": 888888,
-            "server": "Local-PaperSimulator",
-            "currency": self.currency,
-            "balance": round(self.balance, 2),
-            "equity": round(self.equity, 2),
-            "margin": round(margin_used, 2),
-            "free_margin": round(self.equity - margin_used, 2),
-            "floating_pnl": round(floating, 2),
-            "daily_start_balance": round(self.daily_start_balance, 2),
-            "profit_today": profit_today,
-            "profit_today_pct": profit_today_pct,
-            "realized_today": round(realized_today, 2),
-            "monthly_start_balance": round(self.monthly_start_balance, 2),
-            "profit_month": profit_month,
-            "profit_month_pct": profit_month_pct,
-            "est_balance_tomorrow": est_balance_tomorrow,
-            "open_positions": len(self.positions),
-            "closed_trades": len(self.trade_history),
-        }
+            return {
+                "mode": "PAPER",
+                "connected": True,
+                "login": 888888,
+                "server": "Local-PaperSimulator",
+                "currency": self.currency,
+                "balance": round(self.balance, 2),
+                "equity": round(self.equity, 2),
+                "margin": round(margin_used, 2),
+                "free_margin": round(self.equity - margin_used, 2),
+                "floating_pnl": round(floating, 2),
+                "daily_start_balance": round(self.daily_start_balance, 2),
+                "profit_today": profit_today,
+                "profit_today_pct": profit_today_pct,
+                "realized_today": round(realized_today, 2),
+                "monthly_start_balance": round(self.monthly_start_balance, 2),
+                "profit_month": profit_month,
+                "profit_month_pct": profit_month_pct,
+                "est_balance_tomorrow": est_balance_tomorrow,
+                "open_positions": len(self.positions),
+                "closed_trades": len(self.trade_history),
+            }
 
     def update_prices(self, symbol: str, bid: float, ask: float) -> None:
-        self.latest_prices[symbol] = {"bid": bid, "ask": ask, "time": datetime.now(timezone.utc).isoformat()}
-        # Update floating pnl posisi yang terbuka
-        for p in list(self.positions.values()):
-            if p.symbol != symbol:
-                continue
-            cur = bid if p.side == "BUY" else ask
-            p.current_price = cur
-            pnl_price = (cur - p.open_price) if p.side == "BUY" else (p.open_price - cur)
-            pip_val = estimate_pip_value(symbol)
-            pip_size = get_symbol_pip_size(symbol)
-            pips_gain = pnl_price / pip_size
-            p.floating_pnl = round(pips_gain * pip_val * p.lots, 2)
-            p.floating_r = round(pips_gain / p.risk_pips, 2) if p.risk_pips > 0 else 0.0
+        with self._lock:
+            self.latest_prices[symbol] = {"bid": bid, "ask": ask, "time": datetime.now(timezone.utc).isoformat()}
+            # Update floating pnl posisi yang terbuka
+            for p in list(self.positions.values()):
+                if p.symbol != symbol:
+                    continue
+                cur = bid if p.side == "BUY" else ask
+                p.current_price = cur
+                pnl_price = (cur - p.open_price) if p.side == "BUY" else (p.open_price - cur)
+                pip_val = estimate_pip_value(symbol)
+                pip_size = get_symbol_pip_size(symbol)
+                pips_gain = pnl_price / pip_size
+                p.floating_pnl = round(pips_gain * pip_val * p.lots, 2)
+                p.floating_r = round(pips_gain / p.risk_pips, 2) if p.risk_pips > 0 else 0.0
 
-            # Cek apakah menyentuh SL atau TP pada update harga
-            if p.side == "BUY":
-                if bid <= p.sl:
-                    self._execute_exit(p.ticket, p.sl, "SL")
-                elif bid >= p.tp:
-                    self._execute_exit(p.ticket, p.tp, "TP")
-            else:
-                if ask >= p.sl:
-                    self._execute_exit(p.ticket, p.sl, "SL")
-                elif ask <= p.tp:
-                    self._execute_exit(p.ticket, p.tp, "TP")
+                # Cek apakah menyentuh SL atau TP pada update harga
+                if p.side == "BUY":
+                    if bid <= p.sl:
+                        self._execute_exit(p.ticket, p.sl, "SL")
+                    elif bid >= p.tp:
+                        self._execute_exit(p.ticket, p.tp, "TP")
+                else:
+                    if ask >= p.sl:
+                        self._execute_exit(p.ticket, p.sl, "SL")
+                    elif ask <= p.tp:
+                        self._execute_exit(p.ticket, p.tp, "TP")
 
     def _execute_exit(self, ticket: int, exit_price: float, reason: str) -> None:
-        if ticket not in self.positions:
-            return
-        p = self.positions.pop(ticket)
-        pnl_price = (exit_price - p.open_price) if p.side == "BUY" else (p.open_price - exit_price)
-        pip_size = get_symbol_pip_size(p.symbol)
-        pips_gain = pnl_price / pip_size
-        pip_val = estimate_pip_value(p.symbol)
-        realized_pnl = round(pips_gain * pip_val * p.lots, 2)
-        r = round(pips_gain / p.risk_pips, 2) if p.risk_pips > 0 else 0.0
-        self.balance = round(self.balance + realized_pnl, 2)
-        self.equity = round(self.balance + sum(pos.floating_pnl for pos in self.positions.values()), 2)
+        with self._lock:
+            if ticket not in self.positions:
+                return
+            p = self.positions.pop(ticket)
+            pnl_price = (exit_price - p.open_price) if p.side == "BUY" else (p.open_price - exit_price)
+            pip_size = get_symbol_pip_size(p.symbol)
+            pips_gain = pnl_price / pip_size
+            pip_val = estimate_pip_value(p.symbol)
+            realized_pnl = round(pips_gain * pip_val * p.lots, 2)
+            r = round(pips_gain / p.risk_pips, 2) if p.risk_pips > 0 else 0.0
+            self.balance = round(self.balance + realized_pnl, 2)
+            self.equity = round(self.balance + sum(pos.floating_pnl for pos in self.positions.values()), 2)
 
-        now_dt = datetime.now()
-        now_epoch = int(time.time())
-        is_manual = str(getattr(p, 'comment', '') or '').startswith("Manual")
-        source = "MANUAL" if is_manual else "BOT"
-        trade_entry = {
-            "ticket": p.ticket,
-            "symbol": p.symbol,
-            "side": p.side,
-            "lots": p.lots,
-            "open_time": p.open_time,
-            "close_time": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
-            "close_epoch": now_epoch,
-            "open_price": p.open_price,
-            "close_price": exit_price,
-            "sl": p.sl,
-            "tp": p.tp,
-            "r": r,
-            "pnl": realized_pnl,
-            "source": source,
-            "reason": reason,
-        }
-        self.trade_history.append(trade_entry)
-        save_trade_record(trade_entry)
-        logger.info(f"[PAPER] Trade #{ticket} Closed @ {exit_price} ({reason}) | PnL: ${realized_pnl} ({r:+.2f}R)")
+            now_dt = datetime.now()
+            now_epoch = int(time.time())
+            is_manual = str(getattr(p, 'comment', '') or '').startswith("Manual")
+            source = "MANUAL" if is_manual else "BOT"
+            trade_entry = {
+                "ticket": p.ticket,
+                "symbol": p.symbol,
+                "side": p.side,
+                "lots": p.lots,
+                "open_time": p.open_time,
+                "close_time": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "close_epoch": now_epoch,
+                "open_price": p.open_price,
+                "close_price": exit_price,
+                "sl": p.sl,
+                "tp": p.tp,
+                "r": r,
+                "pnl": realized_pnl,
+                "source": source,
+                "reason": reason,
+            }
+            self.trade_history.append(trade_entry)
+            save_trade_record(trade_entry)
+            logger.info(f"[PAPER] Trade #{ticket} Closed @ {exit_price} ({reason}) | PnL: ${realized_pnl} ({r:+.2f}R)")
 
     def get_positions(self) -> List[Position]:
-        return list(self.positions.values())
+        with self._lock:
+            return list(self.positions.values())
 
     def get_trade_history(self) -> List[dict]:
-        res = list(reversed(self.trade_history))
-        for t in res:
-            if "source" not in t:
-                t["source"] = "MANUAL" if str(t.get("comment", "")).startswith("Manual") else "BOT"
-            if "close_epoch" not in t:
-                t["close_epoch"] = int(time.time())
-        res.sort(key=lambda x: (int(x.get("close_epoch", 0)), int(x.get("ticket", 0))), reverse=True)
-        sync_trade_records_to_file(res)
-        return res
+        with self._lock:
+            res = list(reversed(self.trade_history))
+            for t in res:
+                if "source" not in t:
+                    t["source"] = "MANUAL" if str(t.get("comment", "")).startswith("Manual") else "BOT"
+                if "close_epoch" not in t:
+                    t["close_epoch"] = int(time.time())
+            res.sort(key=lambda x: (int(x.get("close_epoch", 0)), int(x.get("ticket", 0))), reverse=True)
+            sync_trade_records_to_file(res)
+            return res
 
     def open_trade(self, symbol: str, side: str, lots: float, sl: float, tp: float, risk_pips: float, comment: str = "") -> Optional[Position]:
-        ticket = self._next_ticket
-        self._next_ticket += 1
-        spec = SYMBOL_SPECS.get(symbol.upper(), {})
-        def_p = spec.get("default_price", 1.0850)
-        spread = spec.get("spread_pips", 1.0) * spec.get("pip_size", 0.0001)
-        quote = self.latest_prices.get(symbol, {"bid": def_p, "ask": def_p + spread})
-        fill_price = quote["ask"] if side == "BUY" else quote["bid"]
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        with self._lock:
+            ticket = self._generate_ticket()
+            spec = SYMBOL_SPECS.get(symbol.upper(), {})
+            def_p = spec.get("default_price", 1.0850)
+            spread = spec.get("spread_pips", 1.0) * spec.get("pip_size", 0.0001)
+            quote = self.latest_prices.get(symbol, {"bid": def_p, "ask": def_p + spread})
+            fill_price = quote["ask"] if side == "BUY" else quote["bid"]
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-        pos = Position(
-            ticket=ticket, symbol=symbol, side=side, lots=lots,
-            open_price=fill_price, current_price=fill_price, sl=sl, tp=tp,
-            risk_pips=risk_pips, r_target=abs(tp - fill_price) / abs(fill_price - sl) if abs(fill_price - sl) > 0 else 1.5,
-            open_time=now_str, comment=comment
-        )
-        self.positions[ticket] = pos
-        logger.info(f"[PAPER] Trade #{ticket} Open {side} {lots} lot @ {fill_price} SL:{sl} TP:{tp}")
-        return pos
+            pos = Position(
+                ticket=ticket, symbol=symbol, side=side, lots=lots,
+                open_price=fill_price, current_price=fill_price, sl=sl, tp=tp,
+                risk_pips=risk_pips, r_target=abs(tp - fill_price) / abs(fill_price - sl) if abs(fill_price - sl) > 0 else 1.5,
+                open_time=now_str, comment=comment
+            )
+            self.positions[ticket] = pos
+            logger.info(f"[PAPER] Trade #{ticket} Open {side} {lots} lot @ {fill_price} SL:{sl} TP:{tp}")
+            return pos
 
     def modify_sl_tp(self, ticket: int, new_sl: float, new_tp: float) -> bool:
-        if ticket in self.positions:
-            self.positions[ticket].sl = new_sl
-            self.positions[ticket].tp = new_tp
-            logger.info(f"[PAPER] Trade #{ticket} SL/TP modified -> SL:{new_sl} TP:{new_tp}")
-            return True
-        return False
+        with self._lock:
+            if ticket in self.positions:
+                self.positions[ticket].sl = new_sl
+                self.positions[ticket].tp = new_tp
+                logger.info(f"[PAPER] Trade #{ticket} SL/TP modified -> SL:{new_sl} TP:{new_tp}")
+                return True
+            return False
 
     def close_trade(self, ticket: int, reason: str = "MANUAL") -> bool:
-        if ticket in self.positions:
-            p = self.positions[ticket]
-            self._execute_exit(ticket, p.current_price, reason)
-            return True
-        return False
+        with self._lock:
+            if ticket in self.positions:
+                p = self.positions[ticket]
+                self._execute_exit(ticket, p.current_price, reason)
+                return True
+            return False
 
     def close_all(self, reason: str = "KILL_SWITCH") -> int:
-        tickets = list(self.positions.keys())
-        for t in tickets:
-            self.close_trade(t, reason)
-        return len(tickets)
+        with self._lock:
+            tickets = list(self.positions.keys())
+            for t in tickets:
+                self.close_trade(t, reason)
+            return len(tickets)
 
 
 class MT5Executor(IExecutor):
