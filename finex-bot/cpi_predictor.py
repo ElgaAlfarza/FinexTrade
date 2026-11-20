@@ -79,20 +79,22 @@ DEFAULT_PPI_PROJECTION = {
         }
     ],
 
-    # Skor Probabilitas Model Kuantitatif
+    # Skor Probabilitas Model Kuantitatif (Template historis - TIDAK TERSEDIA sebelum rilis)
+    "is_verified": False,
+    "source": "TEMPLATE_HISTORIS_UNVERIFIED",
     "probability": {
-        "cooling_inflation_prob": 81.5, # 81.5% peluang PPI Melambat / Di Bawah atau Sesuai Forecast
-        "hot_inflation_prob": 18.5,     # 18.5% risiko kejutan inflasi naik
-        "confidence_level": "TINGGI (A+)",
-        "consensus_verdict": "COOLING_PPI (BIAYA PRODUSEN MEREDA DRASTIS)",
+        "cooling_inflation_prob": 50.0,
+        "hot_inflation_prob": 50.0,
+        "confidence_level": "TIDAK TERSEDIA",
+        "consensus_verdict": "TIDAK TERSEDIA (Memerlukan Kalender Real-Time)",
     },
 
     # Skenario & Rekomendasi Terhadap XAUUSD
     "xauusd_playbook": {
-        "primary_direction": "STRONG_BUY",
-        "action_label": "BULLISH SURGE (STRONG BUY XAUUSD)",
-        "rationale": "Biaya produsen merosot tajam (Core 0.3% vs 0.7%, Headline 0.4% vs 1.3%) -> Yield US Treasury 10Y & Dolar AS (DXY) anjlok -> XAUUSD (Emas) sebagai safe-haven tanpa imbal hasil meroket kencang.",
-        "expected_move_pips": "+60 s/d +120 pips (+6.00 hingga +12.00 poin Emas)",
+        "primary_direction": "NEUTRAL",
+        "action_label": "TIDAK TERSEDIA",
+        "rationale": "Data makro PPI belum dirilis secara resmi.",
+        "expected_move_pips": "0 pips",
         "potential_gain_usd": {
             "lot_0_01": "+$6.00 s/d +$12.00",
             "lot_0_02": "+$12.00 s/d +$24.00",
@@ -194,18 +196,21 @@ DEFAULT_CPI_PROJECTION = {
         }
     ],
 
+    # Skor Probabilitas Model Kuantitatif (Template historis - TIDAK TERSEDIA sebelum rilis)
+    "is_verified": False,
+    "source": "TEMPLATE_HISTORIS_UNVERIFIED",
     "probability": {
-        "cooling_inflation_prob": 84.5,
-        "hot_inflation_prob": 15.5,
-        "confidence_level": "SANGAT TINGGI (A+)",
-        "consensus_verdict": "COOLING_INFLATION (CPI MELAMBAT)",
+        "cooling_inflation_prob": 50.0,
+        "hot_inflation_prob": 50.0,
+        "confidence_level": "TIDAK TERSEDIA",
+        "consensus_verdict": "TIDAK TERSEDIA (Memerlukan Kalender Real-Time)",
     },
 
     "xauusd_playbook": {
-        "primary_direction": "STRONG_BUY",
-        "action_label": "BULLISH EXPLOSION (BUY XAUUSD)",
-        "rationale": "Inflasi AS melambat (0.14% vs 0.40%) -> The Fed leluasa memangkas suku bunga (Dovish Rate Cut) -> DXY & Yield Treasury anjlok -> Emas XAUUSD melonjak tinggi.",
-        "expected_move_pips": "+80 s/d +150 pips (+8.0 hingga +15.0 poin Emas)",
+        "primary_direction": "NEUTRAL",
+        "action_label": "TIDAK TERSEDIA",
+        "rationale": "Data inflasi CPI belum dirilis secara resmi.",
+        "expected_move_pips": "0 pips",
         "potential_gain_usd": {
             "lot_0_01": "+$8.00 s/d +$15.00",
             "lot_0_02": "+$16.00 s/d +$30.00",
@@ -252,7 +257,7 @@ class CpiPredictor:
 
     def __init__(self, config_file: str = CPI_CONFIG_FILE):
         self.config_file = config_file
-        self.sniper_enabled: bool = True
+        self.sniper_enabled: bool = False  # Default: NONAKTIF demi keamanan (P0-5)
         self.sniper_mode: str = "PRE_POSITIONING" # "PRE_POSITIONING" atau "POST_MOMENTUM"
         self.target_lot: float = 0.02
         self.target_cuan_usd: float = 15.0
@@ -408,6 +413,18 @@ class CpiPredictor:
         active_data = summary.get("cpi_projection", {})
         ev_name = summary.get("active_event", "MACRO")
         
+        if not active_data.get("is_verified", False):
+            return {
+                "symbol": symbol,
+                "action": "WAIT",
+                "is_cooling": False,
+                "probability_pct": 0.0,
+                "confidence": "TIDAK TERSEDIA",
+                "event_name": ev_name,
+                "direction_desc": "TIDAK TERSEDIA (Memerlukan Kalender Real-Time)",
+                "rationale": f"Data Makro {ev_name} belum diverifikasi dari feed kalender resmi. Sinyal arah tidak tersedia.",
+            }
+
         prob = active_data.get("probability", {})
         cooling_prob = float(prob.get("cooling_inflation_prob", 50.0))
         hot_prob = float(prob.get("hot_inflation_prob", 50.0))
@@ -415,20 +432,12 @@ class CpiPredictor:
         factors = active_data.get("factors", [])
         factor_score = sum(float(f.get("score", 0.0)) for f in factors)
         
-        # Cek playbook jika ada penetapan arah eksplisit
-        playbook = active_data.get("xauusd_playbook", {})
-        playbook_dir = str(playbook.get("primary_direction", "")).upper()
-        
         # Skor komposit probabilitas: > 0 artinya inflasi melambat (USD bearish), < 0 artinya inflasi panas (USD bullish)
         composite_score = (cooling_prob - hot_prob) / 100.0
         if factor_score != 0:
             composite_score += (-factor_score * 0.4)
             
         is_cooling = composite_score > 0
-        if "BUY" in playbook_dir:
-            is_cooling = True
-        elif "SELL" in playbook_dir:
-            is_cooling = False
             
         sym_upper = symbol.upper()
         is_gold = "XAU" in sym_upper or "GOLD" in sym_upper
@@ -471,7 +480,13 @@ class CpiPredictor:
         technicals: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Mengevaluasi apakah saat ini waktu yang tepat untuk eksekusi posisi Macro Sniper (BUY atau SELL sesuai data)."""
+        if not self.sniper_enabled:
+            return {"should_execute": False, "reason": "CPI/PPI Sniper nonaktif (default keamanan)."}
+
         summary = self.get_cpi_nowcast_summary("AUTO")
+        if not summary.get("cpi_projection", {}).get("is_verified", False):
+            return {"should_execute": False, "reason": "Data makro belum terverifikasi dari sumber kalender resmi."}
+
         diff_sec = summary.get("diff_seconds", 999999)
         ev_name = summary.get("active_event", "MACRO")
         

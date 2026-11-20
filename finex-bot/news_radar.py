@@ -167,10 +167,24 @@ class EconomicNewsRadar:
         return self._cached_events
 
     def get_news_shield_status(self) -> Dict[str, Any]:
-        """Periksa apakah saat ini sedang dalam zona bahaya rilis berita High-Impact."""
+        """Periksa apakah saat ini sedang dalam zona bahaya rilis berita High-Impact (Fail-Closed)."""
+        now_ts = time.time()
         events = self.fetch_calendar_events()
         now_utc = datetime.now(timezone.utc)
         
+        # Fail-closed guard: jika kalender kedaluwarsa (>24 jam) atau kosong, tahan entry (P1-3)
+        cache_age = now_ts - self._last_fetch_ts
+        if (self._last_fetch_ts > 0 and cache_age > 86400) or (not events and self._last_fetch_ts == 0):
+            return {
+                "is_shield_active": True and self.news_shield_enabled,
+                "shield_enabled": self.news_shield_enabled,
+                "status": "KALENDER_KEDALUWARSA_ENTRY_DITAHAN",
+                "warning": "🚨 NEWS SHIELD AKTIF: Kalender ekonomi kedaluwarsa (>24 jam) atau belum terupdate. Entry ditahan demi keselamatan akun (fail-closed).",
+                "active_event": None,
+                "closest_event": None,
+                "checked_at": now_utc.strftime("%Y-%m-%d %H:%M:%S UTC"),
+            }
+
         is_shield_active = False
         active_event: Optional[Dict[str, Any]] = None
         closest_event: Optional[Dict[str, Any]] = None

@@ -1421,8 +1421,8 @@ class OrderManager:
                             "INFO",
                         )
 
-            # 4. PENGAMAN BATAS RUGI DARURAT PROPORSIONAL ($)
-            if not is_macro_sniper and max_loss_usd > 0 and p.floating_pnl <= -max_loss_usd:
+            # 4. PENGAMAN BATAS RUGI DARURAT PROPORSIONAL ($) - Berlaku ke SEMUA posisi tanpa pengecualian
+            if max_loss_usd > 0 and p.floating_pnl <= -max_loss_usd:
                 ok = self.executor.close_trade(p.ticket, reason=f"STOP_LOSS_{max_loss_usd:.2f}")
                 if ok:
                     self.log(

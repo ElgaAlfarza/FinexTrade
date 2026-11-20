@@ -105,23 +105,14 @@ class GeminiMarketAnalyst:
         """Analisis mendalam kondisi grafik sebelum bot membuka posisi (Pre-Trade Confirmation Gate)."""
         digits = symbol_decimals(symbol)
 
-        # Validasi Kaidah Setup: Jika tren EMA Ribbon valid, izinkan bot membuka posisi otomatis
-        if action in ("BUY", "SELL"):
-            return {
-                "approved": True,
-                "confidence": 88,
-                "decision": "APPROVED",
-                "direction_bias": action,
-                "reason": f"AI Analis Menyetujui Setup {action}: Mengikuti arus tren momentum EMA Ribbon.",
-                "gemini_active": self.is_available(),
-            }
-
+        # LLM (Gemini) TIDAK berada di jalur eksekusi order (Aturan Keras #5).
+        # Jika Gemini belum aktif, kembalikan passthrough deterministik tanpa angka palsu.
         if not self.is_available():
             return {
-                "approved": True,  # Fallback jika API key belum dimasukkan
+                "approved": True,
                 "decision": "PASSTHROUGH",
-                "confidence": 75,
-                "reason": "AI Gemini belum diaktifkan (kuantitatif engine lolos verifikasi).",
+                "confidence": None,
+                "reason": "AI Gemini tidak aktif. Setup sepenuhnya divalidasi oleh engine deterministik.",
                 "gemini_active": False,
             }
 
@@ -575,7 +566,7 @@ Jawab HANYA dalam format JSON valid berikut (tanpa markdown backtick):
 
             result = {
                 "bias": bias_str,
-                "confidence": 82,
+                "confidence": None,
                 "outlook_title": title_str,
                 "future_summary": future_text,
                 "predicted_path": f"{'Uji Support ' + str(sup_price) + ' -> Pantulan ' + str(piv_price) if is_down else 'Uji Resistance ' + str(res_price)}",
@@ -586,7 +577,7 @@ Jawab HANYA dalam format JSON valid berikut (tanpa markdown backtick):
                     {"price": piv_price, "type": "PIVOT", "label": "Batas Retracement Pivot", "color": "#F59E0B"},
                 ],
                 "gemini_active": self.is_available(),
-                "model_used": "Algorithmic Market Structure Fallback" if not self.is_available() else "gemini-3.5-flash",
+                "model_used": "Algorithmic Market Structure" if not self.is_available() else "gemini-2.5-flash",
             }
 
         # 6. Guardrail: Pastikan recommended_action tidak pernah melanggar rezim pasar
@@ -599,7 +590,8 @@ Jawab HANYA dalam format JSON valid berikut (tanpa markdown backtick):
             result["trader_action"] = f"Proteksi Anti-Melawan Tren: SELL dibatalkan karena pasar dalam tren naik kuat ({net_move_10:+.{digits}f}). Fokus BUY."
 
         result["recommended_action"] = ai_action
-        thought_steps[-1]["detail"] = f"Rekomendasi Aksi: {ai_action} @ {last_c:.{digits}f} | Keyakinan: {result.get('confidence', 80)}% | Divalidasi data real-time bebas halusinasi."
+        conf_display = f"{result.get('confidence')}%" if result.get('confidence') is not None else "TIDAK TERSEDIA"
+        thought_steps[-1]["detail"] = f"Rekomendasi Aksi: {ai_action} @ {last_c:.{digits}f} | Keyakinan: {conf_display} | Divalidasi data real-time bebas halusinasi."
         thought_steps[-1]["badge"] = ai_action
 
         result["thought_steps"] = thought_steps
@@ -700,14 +692,10 @@ Jawab HANYA dalam format JSON valid berikut (tanpa markdown backtick):
             return {
                 "active": False,
                 "sentiment": "NETRAL",
-                "bias_confidence": 50,
-                "headline": "AI Gemini Standby (Menunggu API Key)",
-                "macro_factors": [
-                    "Data The Fed: Standby",
-                    "Dolar AS (DXY): Standby",
-                    "Geopolitik & Safe Haven: Standby"
-                ],
-                "impact_summary": "API Key belum terpasang atau kuota limit. Bot berjalan dengan analisis teknikal murni.",
+                "bias_confidence": 0,
+                "headline": "TIDAK TERSEDIA",
+                "macro_factors": [],
+                "impact_summary": "AI Gemini belum diaktifkan atau API key tidak tersedia. Sistem berjalan dengan analisis teknikal deterministik.",
                 "recommended_bias": "NEUTRAL",
                 "updated_at": time.strftime("%H:%M:%S UTC", time.gmtime()),
             }
@@ -732,17 +720,13 @@ Berikan analisis dalam format JSON murni:
 }"""
 
         fallback = {
-            "active": True,
-            "sentiment": "BULLISH",
-            "bias_confidence": 78,
-            "headline": "Emas Mempertahankan Tren Positif di Tengah Ekspektasi Suku Bunga & Safe Haven",
-            "macro_factors": [
-                "The Fed: Sinyal dovish/pemangkasan suku bunga mendukung daya tarik emas",
-                "DXY: Indeks Dolar AS terkonsolidasi, memberi ruang apresiasi bagi logam mulia",
-                "Safe Haven: Permintaan aset lindung nilai tetap solid di pasar global"
-            ],
-            "impact_summary": "Faktor makroekonomi global saat ini condong memberikan katalis positif bagi XAUUSD.",
-            "recommended_bias": "BUY",
+            "active": False,
+            "sentiment": "NETRAL",
+            "bias_confidence": 0,
+            "headline": "TIDAK TERSEDIA",
+            "macro_factors": [],
+            "impact_summary": "Data sentimen berita tidak tersedia. Sistem berjalan dengan analisis teknikal deterministik.",
+            "recommended_bias": "NEUTRAL",
             "updated_at": time.strftime("%H:%M:%S UTC", time.gmtime()),
         }
 
@@ -781,17 +765,21 @@ Berikan analisis dalam format JSON murni:
         threading.Thread(target=_fetch_worker, daemon=True).start()
         return getattr(self, "_cached_news", None) or fallback
 
-    def _call_gemini_api(self, prompt: str) -> Dict[str, Any]:
-        """Panggil Gemini API untuk analisis validasi setup trading."""
-        # 1. Direct REST via requests (paling stabil & kompatibel di Windows)
-        models_to_try = ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.6-flash")
+    def _call_gemini_api(self, prompt: str) -> Optional[Dict[str, Any]]:
+        """Panggil Gemini API untuk analisis visual/naratif pasar (Bukan untuk eksekusi trade)."""
+        if not self.api_key:
+            return None
+        # 1. Direct REST via requests dengan header x-goog-api-key dan SSL verification aktif
+        models_to_try = ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash")
         try:
             import requests
-            import urllib3
-            urllib3.disable_warnings()
 
             for model_name in models_to_try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.api_key}"
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+                headers = {
+                    "x-goog-api-key": self.api_key,
+                    "Content-Type": "application/json",
+                }
                 payload = {
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {
@@ -800,7 +788,7 @@ Berikan analisis dalam format JSON murni:
                     }
                 }
                 try:
-                    res = requests.post(url, json=payload, verify=False, timeout=12.0)
+                    res = requests.post(url, json=payload, headers=headers, verify=True, timeout=12.0)
                     if res.status_code == 200:
                         d = res.json()
                         candidates = d.get("candidates", [])
@@ -819,9 +807,9 @@ Berikan analisis dalam format JSON murni:
         except Exception as e:
             logger.warning(f"REST Gemini Call Gagal: {e}")
 
-        # 2. Coba lewat google.genai SDK
+        # 2. Coba lewat google.genai SDK jika terpasang
         if self._client:
-            for model_name in ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.8-flash"):
+            for model_name in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"):
                 try:
                     resp = self._client.models.generate_content(
                         model=model_name,
@@ -837,7 +825,6 @@ Berikan analisis dalam format JSON murni:
                     logger.debug(f"Gagal call SDK model {model_name}: {e}")
                     continue
 
-        # Kembalikan None jika semua model gagal agar caller menjalankan fallback kuantitatif spesifik
         return None
 
     def _extract_json(self, text: str) -> Optional[Dict[str, Any]]:

@@ -1219,102 +1219,85 @@ class LiveBotEngine:
         if is_bull_align or fresh_golden_cross:
             if not m15_bullish:
                 action = "WAIT"
-                conf = 55.0
+                conf = 0.0
                 reason = f"⏳ Filter Makro M15: Harga di bawah EMA 50 M15 ({ema_m15_50:.{digits}f}). Dilarang BUY melawan tren makro (Hindari Bull-Trap)."
             elif adx_val < 20.0:
                 action = "WAIT"
-                conf = 50.0
+                conf = 0.0
                 reason = f"⏳ Filter Anti-Chop: ADX rendah ({adx_val:.1f} < 20). Pasar sedang sideways / tanpa tren. Dilarang entry MA untuk cegah whipsaw."
             elif ema21_slope < 0.20:
                 action = "WAIT"
-                conf = 52.0
+                conf = 0.0
                 reason = f"⏳ Filter Momentum (Slope): Sudut EMA 21 mendatar ({ema21_slope:+.2f}p). Dorongan tren naik belum cukup kuat."
             elif rsi_val > 68.0:
                 action = "WAIT"
-                conf = 54.0
+                conf = 0.0
                 reason = f"⏳ Filter RSI Exhaustion: RSI jenuh beli ({rsi_val:.1f} > 68). Risiko tinggi buying the top / koreksi tajam."
             elif room_to_res < (1.0 * atr):
                 action = "WAIT"
-                conf = 53.0
+                conf = 0.0
                 reason = f"⏳ Filter Ruang Gerak S/R: Harga terlalu dekat dengan Resistance Swing High ({swing_h20:.{digits}f}, sisa {room_to_res/pip:.1f}p). Ruang gerak sempit."
             elif overextended_bull:
                 action = "WAIT"
-                conf = 58.0
+                conf = 0.0
                 reason = f"⏳ EMA Trend: Harga overextended (+{(last_c - ema8)/pip:.1f} pip dari EMA 8). Menunggu pullback sehat ke zona EMA 8/21 sebelum BUY."
             elif bull_in_pocket and is_bull_rejection:
                 action = "BUY"
-                conf = 92.0
+                conf = 50.0 + (15.0 if adx_val >= 25.0 else 10.0) + (15.0 if 45.0 <= rsi_val <= 60.0 else 10.0) + 10.0 + (10.0 if m15_bullish else 0.0)
                 reason = f"📈 EMA Trend BUY [A+ Retest]: Pullback ke Dynamic Support (EMA 8/21) & Rejection Bullish ({ema8:.{digits}f}) | ADX kuat ({adx_val:.1f}) & RSI sehat ({rsi_val:.1f})."
             elif fresh_golden_cross and candle_body > (0.45 * candle_range) and last_c > ema8 and ema8_slope > 0.35:
                 action = "BUY"
-                conf = 88.0
+                conf = 50.0 + (15.0 if adx_val >= 25.0 else 10.0) + (15.0 if 45.0 <= rsi_val <= 60.0 else 10.0) + 5.0 + (10.0 if m15_bullish else 0.0)
                 reason = f"🚀 EMA Trend BUY [Golden Cross]: EMA 8 menembus ke atas EMA 21 dengan candle bullish impulsif ({last_c:.{digits}f}) | ADX: {adx_val:.1f}."
             else:
                 action = "WAIT"
-                conf = 52.0
+                conf = 0.0
                 reason = f"⏳ EMA Trend: Harga belum menyentuh Dynamic Support EMA 8/21 atau belum ada candle rejection valid (Disiplin WAIT)."
 
         elif is_bear_align or fresh_death_cross:
             if not m15_bearish:
                 action = "WAIT"
-                conf = 55.0
+                conf = 0.0
                 reason = f"⏳ Filter Makro M15: Harga di atas EMA 50 M15 ({ema_m15_50:.{digits}f}). Dilarang SELL melawan tren makro (Hindari Bear-Trap)."
             elif adx_val < 20.0:
                 action = "WAIT"
-                conf = 50.0
+                conf = 0.0
                 reason = f"⏳ Filter Anti-Chop: ADX rendah ({adx_val:.1f} < 20). Pasar sedang sideways / tanpa tren. Dilarang entry MA untuk cegah whipsaw."
             elif ema21_slope > -0.20:
                 action = "WAIT"
-                conf = 52.0
+                conf = 0.0
                 reason = f"⏳ Filter Momentum (Slope): Sudut EMA 21 mendatar ({ema21_slope:+.2f}p). Dorongan tren turun belum cukup kuat."
             elif rsi_val < 32.0:
                 action = "WAIT"
-                conf = 54.0
+                conf = 0.0
                 reason = f"⏳ Filter RSI Exhaustion: RSI jenuh jual ({rsi_val:.1f} < 32). Risiko tinggi selling the bottom / pantulan tajam."
             elif room_to_sup < (1.0 * atr):
                 action = "WAIT"
-                conf = 53.0
+                conf = 0.0
                 reason = f"⏳ Filter Ruang Gerak S/R: Harga terlalu dekat dengan Support Swing Low ({swing_l20:.{digits}f}, sisa {room_to_sup/pip:.1f}p). Ruang gerak sempit."
             elif overextended_bear:
                 action = "WAIT"
-                conf = 58.0
+                conf = 0.0
                 reason = f"⏳ EMA Trend: Harga overextended (-{(ema8 - last_c)/pip:.1f} pip dari EMA 8). Menunggu koreksi naik ke zona EMA 8/21 sebelum SELL."
             elif bear_in_pocket and is_bear_rejection:
                 action = "SELL"
-                conf = 92.0
+                conf = 50.0 + (15.0 if adx_val >= 25.0 else 10.0) + (15.0 if 40.0 <= rsi_val <= 55.0 else 10.0) + 10.0 + (10.0 if m15_bearish else 0.0)
                 reason = f"📉 EMA Trend SELL [A+ Retest]: Pullback ke Dynamic Resistance (EMA 8/21) & Rejection Bearish ({ema8:.{digits}f}) | ADX kuat ({adx_val:.1f}) & RSI sehat ({rsi_val:.1f})."
             elif fresh_death_cross and candle_body < -(0.45 * candle_range) and last_c < ema8 and ema8_slope < -0.35:
                 action = "SELL"
-                conf = 88.0
+                conf = 50.0 + (15.0 if adx_val >= 25.0 else 10.0) + (15.0 if 40.0 <= rsi_val <= 55.0 else 10.0) + 5.0 + (10.0 if m15_bearish else 0.0)
                 reason = f"🩸 EMA Trend SELL [Death Cross]: EMA 8 menembus ke bawah EMA 21 dengan candle bearish impulsif ({last_c:.{digits}f}) | ADX: {adx_val:.1f}."
             else:
                 action = "WAIT"
-                conf = 52.0
+                conf = 0.0
                 reason = f"⏳ EMA Trend: Harga belum menyentuh Dynamic Resistance EMA 8/21 atau belum ada candle rejection valid (Disiplin WAIT)."
 
         else:
             action = "WAIT"
-            conf = 45.0
+            conf = 0.0
             reason = f"⏳ EMA Trend: Moving Average konsolidasi/sideways (EMA 8: {ema8:.{digits}f}, EMA 21: {ema21:.{digits}f}, EMA 50: {ema50:.{digits}f}). Menunggu pembentukan tren searah."
 
-        # Integrasi Berita & Sentimen Fundamental Makro XAUUSD (AI Gemini)
-        news_info_local = None
-        try:
-            from gemini_analyst import get_gemini_analyst
-            g_analyst = get_gemini_analyst()
-            news_info_local = g_analyst.get_xauusd_news_sentiment(force_refresh=False)
-            news_bias = str(news_info_local.get("recommended_bias", "NEUTRAL")).upper()
-            news_headline = str(news_info_local.get("headline", ""))
-            if action == "BUY" and news_bias == "BUY":
-                conf = min(96.0, conf + 7.0)
-                reason += f" | 📰 Berita Emas (Gemini): Sentimen Positif ({news_headline})"
-            elif action == "SELL" and news_bias == "SELL":
-                conf = min(96.0, conf + 7.0)
-                reason += f" | 📰 Berita Emas (Gemini): Sentimen Negatif ({news_headline})"
-        except Exception:
-            pass
-
-        # Integrasi Model Prediktif EURUSD (Bagging Regressor Ensemble dari Notebook)
+        # Integrasi Model Prediktif EURUSD (Regresi Linear Kuantitatif)
         if sym == "EURUSD" and df is not None and len(df) >= 50:
             try:
                 state_path = os.path.join(os.path.dirname(__file__), "data", "eurusd_model_state.json")
@@ -1363,19 +1346,17 @@ class LiveBotEngine:
                     if action == "BUY":
                         if drift < -2.0:
                             action = "WAIT"
-                            conf = 50.0
-                            reason = f"⏳ Filter AI EURUSD: Model memprediksi drift turun ({drift:+.1f}p). Dilarang BUY melawan model regresi."
+                            conf = 0.0
+                            reason = f"⏳ Filter Model EURUSD: Drift negatif ({drift:+.1f}p). Dilarang BUY melawan model regresi."
                         elif drift > 1.2:
-                            conf = min(96.0, conf + 6.0)
-                            reason += f" | 🤖 AI EURUSD (Ensemble): Prediksi Drift Positif ({drift:+.1f}p, Akurasi: 69.1%)"
+                            reason += f" | Model Regresi EURUSD: Prediksi Drift Positif ({drift:+.1f}p)"
                     elif action == "SELL":
                         if drift > 2.0:
                             action = "WAIT"
-                            conf = 50.0
-                            reason = f"⏳ Filter AI EURUSD: Model memprediksi drift naik ({drift:+.1f}p). Dilarang SELL melawan model regresi."
+                            conf = 0.0
+                            reason = f"⏳ Filter Model EURUSD: Drift positif ({drift:+.1f}p). Dilarang SELL melawan model regresi."
                         elif drift < -1.2:
-                            conf = min(96.0, conf + 6.0)
-                            reason += f" | 🤖 AI EURUSD (Ensemble): Prediksi Drift Negatif ({drift:+.1f}p, Akurasi: 69.1%)"
+                            reason += f" | Model Regresi EURUSD: Prediksi Drift Negatif ({drift:+.1f}p)"
             except Exception as e_eur:
                 logger.debug(f"Evaluasi model EURUSD dilewati: {e_eur}")
 
@@ -1490,7 +1471,8 @@ class LiveBotEngine:
             "risk_usd": risk_usd,
             "lot": lot,
             "calculated_lot": calculated_lot,
-            "confidence": round(min(92.0, max(45.0, conf)), 1),
+            "confidence": round(conf, 1) if action in ("BUY", "SELL") else 0.0,
+            "setup_score": round(conf, 1) if action in ("BUY", "SELL") else 0.0,
             "reason": reason,
             "technique": "EMA_TREND",
             "contributing_techniques": ["EMA_TREND"],
@@ -1520,7 +1502,7 @@ class LiveBotEngine:
             "time": datetime.now(timezone.utc).isoformat(),
             "trading_mode": getattr(self.params, "trading_mode", "scalping"),
             "scalping_direction": direction_mode,
-            "gemini_news": news_info_local,
+            "gemini_news": None,
         }
 
         if sym == self.symbol:
@@ -1572,6 +1554,16 @@ class LiveBotEngine:
             return
         if self._market_closed():
             return
+
+        # PILAR 0: Proteksi Berita High-Impact (News Shield Circuit Breaker: CPI, NFP, GDP, FOMC - Fail Closed)
+        try:
+            from news_radar import get_news_radar
+            shield_st = get_news_radar().get_news_shield_status()
+            if shield_st.get("is_shield_active", False):
+                self.last_diag = shield_st.get("warning", "🚨 NEWS SHIELD AKTIF: Menahan order saat rilis High-Impact News.")
+                return
+        except Exception:
+            pass
 
         # 0. Evaluasi CPI/PPI Auto-Sniper (Big Move Anticipator Berbasis Data Nowcasting)
         try:
@@ -1625,13 +1617,14 @@ class LiveBotEngine:
                         )
                         if not has_cpi_pos_sym and len(all_pos) < self.max_total_open_positions:
                             action_side = 1 if cpi_eval["action"] == "BUY" else -1
+                            real_spread_pips = (cur_ask - cur_bid) / pip_sz if pip_sz > 0 else 1.0
                             pos = self.order_manager.execute_scalping(
                                 symbol=target_sym,
                                 side=action_side,
                                 sl=cpi_eval["sl_price"],
                                 tp=cpi_eval["tp_price"],
                                 current_price=cpi_eval["entry_price"],
-                                spread_pips=2.5 if "XAU" in target_sym else 1.2,
+                                spread_pips=real_spread_pips,
                                 lot=cpi_eval["lot"],
                                 target_usd=cpi_eval["target_usd"],
                                 technique="CPI_SNIPER",
@@ -1644,16 +1637,6 @@ class LiveBotEngine:
                                 return
         except Exception as e_cpi:
             logger.debug(f"CPI Auto-Sniper check skipped: {e_cpi}")
-
-        # Proteksi Berita High-Impact (News Shield Circuit Breaker: CPI, NFP, GDP, FOMC)
-        try:
-            from news_radar import get_news_radar
-            shield_st = get_news_radar().get_news_shield_status()
-            if shield_st.get("is_shield_active", False):
-                self.last_diag = shield_st.get("warning", "🚨 NEWS SHIELD AKTIF: Menahan order saat rilis High-Impact News.")
-                return
-        except Exception:
-            pass
 
         # 8. Eksekusi Order Scalping Otomatis Berdasarkan MA EMA Ribbon
 
@@ -1812,38 +1795,21 @@ class LiveBotEngine:
             except Exception as e:
                 logger.debug(f"Pengecekan konfluensi forecast ({sym}) dilewati: {e}")
 
-            # b. Verifikasi AI GEMINI & Kaidah 6-Pilar (Regime Filter & Anti-Trap Protection)
-            try:
-                from gemini_analyst import get_gemini_analyst
-                analyst = get_gemini_analyst()
-                ai_eval = analyst.analyze_trade_setup(
-                    symbol=sym,
-                    timeframe=self.timeframe,
-                    action=sig["action"],
-                    current_price=sig["entry_price"],
-                    proposed_tp=sig["tp_price"],
-                    proposed_sl=sig["sl_price"],
-                    target_usd=sig["target_usd"],
-                    risk_usd=sig.get("risk_usd", sig["target_usd"]),
-                    df_candles=sym_df,
-                    forecast_direction=fc_dir,
-                    forecast_prob=fc_prob,
-                )
-                if not ai_eval.get("approved", True):
-                    reason_msg = ai_eval.get("reason", "Kondisi pasar berisiko tinggi.")
-                    if sym == self.symbol:
-                        self.last_diag = f"AI GATE REJECTED ({sym}): Order {sig['action']} dibatalkan! {reason_msg}"
-                    self.order_manager.log(f"🤖 AI GATE TOLAK ENTRY [{sym}]: {sig['action']} ({ai_eval.get('confidence', 0)}%) - {reason_msg}", "WARNING")
-                    continue
-                else:
-                    reason_msg = ai_eval.get("reason", "Setup terkonfirmasi valid.")
-                    self.order_manager.log(f"🤖 AI GATE SETUJUI ENTRY [{sym}] ({ai_eval.get('confidence', 75)}%): {reason_msg}", "INFO")
-            except Exception as e:
-                logger.debug(f"AI Gemini Analyst ({sym}) dilewati: {e}")
-
-            # 8. Eksekusi Order Scalping Mandiri
+            # b. Verifikasi Deterministik Pra-Eksekusi (Spread & Dynamic Risk Validation)
             pip_size = get_symbol_pip_size(sym)
             spread_pips = (sym_ask - sym_bid) / pip_size if pip_size > 0 else 1.0
+
+            # Filter Maksimum Spread: Batasi pelebaran spread agar tidak memakan margin (Gold max 4.0p, FX max 2.5p)
+            max_allowed_spread = 4.0 if ("XAU" in sym or "GOLD" in sym) else 2.5
+            if spread_pips > max_allowed_spread:
+                if sym == self.symbol:
+                    self.last_diag = f"SPREAD FILTER ({sym}): Spread melebar ({spread_pips:.1f}p > {max_allowed_spread:.1f}p). Order {sig['action']} ditahan."
+                self.order_manager.log(f"⚠️ SPREAD FILTER [{sym}]: Order ditahan karena spread tinggi ({spread_pips:.1f}p > {max_allowed_spread:.1f}p)", "WARNING")
+                continue
+
+            self.order_manager.log(f"✅ PRE-TRADE GATE [{sym}]: Lolos verifikasi deterministik (Spread: {spread_pips:.1f}p | Setup: {sig.get('setup_score', 0)}%)", "INFO")
+
+            # 8. Eksekusi Order Scalping Mandiri
             side_int = 1 if sig["action"] == "BUY" else -1
 
             active_tech = sig.get("technique") or getattr(self.params, "active_technique", "ALL")

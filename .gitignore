@@ -15,6 +15,8 @@ learner_state*.json
 **/learner_state*.json
 session_reset.json
 **/session_reset.json
+economic_calendar_cache.json
+**/economic_calendar_cache.json
 
 # Trade Data & Logs
 *.csv
