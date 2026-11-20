@@ -209,3 +209,30 @@ def format_report(stats: dict, p: StrategyParams, target_wr: float = 0.90) -> st
 
 def with_params(p: StrategyParams, **kw) -> StrategyParams:
     return dataclasses.replace(p, **kw)
+
+
+def run_walk_forward_backtest(
+    df: pd.DataFrame,
+    p: StrategyParams,
+    train_ratio: float = 0.7,
+) -> dict:
+    """Jalankan evaluasi split In-Sample (Train) vs Out-of-Sample (Test) secara jujur tanpa curve-fitting."""
+    n = len(df)
+    split_idx = int(n * train_ratio)
+    train_df = df.iloc[:split_idx]
+    test_df = df.iloc[split_idx:]
+
+    train_trades = run_backtest(train_df, p)
+    test_trades = run_backtest(test_df, p)
+
+    train_stats = compute_stats(train_trades, p)
+    test_stats = compute_stats(test_trades, p)
+
+    return {
+        "train_range": (str(train_df.index[0]), str(train_df.index[-1])),
+        "test_range": (str(test_df.index[0]), str(test_df.index[-1])),
+        "train_stats": train_stats,
+        "test_stats": test_stats,
+        "train_report": format_report(train_stats, p),
+        "test_report": format_report(test_stats, p),
+    }

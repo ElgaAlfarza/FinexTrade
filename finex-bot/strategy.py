@@ -138,8 +138,134 @@ def ma_direction(ma: pd.DataFrame, mode: str) -> np.ndarray:
     return np.where(up, 1, np.where(dn, -1, 0))
 
 
-def generate_signals(df: pd.DataFrame, p: StrategyParams) -> pd.DataFrame:
-    """Kembalikan DataFrame side (1 buy, -1 sell, 0 tidak ada), sl, tp per candle."""
+def generate_ema_trend_signals(df: pd.DataFrame, p: StrategyParams) -> pd.DataFrame:
+    """Sinyal EMA 8/21/50 Trend Following + ADX + RSI + Dynamic Pocket (100% identik dengan live)."""
+    pip = p.pip_size
+    c = df["close"].to_numpy(float)
+    o = df["open"].to_numpy(float)
+    h = df["high"].to_numpy(float)
+    l = df["low"].to_numpy(float)
+    n = len(df)
+    if n < 50:
+        return pd.DataFrame({"side": np.zeros(n, dtype=int), "sl": np.full(n, np.nan), "tp": np.full(n, np.nan)}, index=df.index)
+
+    # 1. EMA 8, 21, 50
+    ema8_series = df["close"].ewm(span=8, adjust=False).mean()
+    ema21_series = df["close"].ewm(span=21, adjust=False).mean()
+    ema50_series = df["close"].ewm(span=50, adjust=False).mean()
+
+    ema8 = ema8_series.to_numpy()
+    ema21 = ema21_series.to_numpy()
+    ema50 = ema50_series.to_numpy()
+
+    ema8_slope = np.zeros(n)
+    ema21_slope = np.zeros(n)
+    ema8_slope[1:] = (ema8[1:] - ema8[:-1]) / pip
+    ema21_slope[1:] = (ema21[1:] - ema21[:-1]) / pip
+
+    # 2. True Range & ATR (14)
+    tr = np.maximum(h - l, np.maximum(np.abs(h - np.roll(c, 1)), np.abs(l - np.roll(c, 1))))
+    tr[0] = h[0] - l[0]
+    atr_series = pd.Series(tr, index=df.index).rolling(14, min_periods=1).mean()
+    atr = atr_series.to_numpy()
+    atr = np.maximum(atr, 2.0 * pip)
+
+    # 3. RSI (14)
+    delta = df["close"].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-9)
+    rsi_series = 100.0 - (100.0 / (1.0 + rs))
+    rsi = rsi_series.to_numpy()
+
+    # 4. ADX (14)
+    up_move = np.zeros(n)
+    down_move = np.zeros(n)
+    up_move[1:] = h[1:] - h[:-1]
+    down_move[1:] = l[:-1] - l[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    tr_smooth = pd.Series(tr, index=df.index).ewm(alpha=1/14, adjust=False).mean().to_numpy()
+    plus_di = 100.0 * (pd.Series(plus_dm, index=df.index).ewm(alpha=1/14, adjust=False).mean().to_numpy() / (tr_smooth + 1e-9))
+    minus_di = 100.0 * (pd.Series(minus_dm, index=df.index).ewm(alpha=1/14, adjust=False).mean().to_numpy() / (tr_smooth + 1e-9))
+    dx = 100.0 * (np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9))
+    adx = pd.Series(dx, index=df.index).ewm(alpha=1/14, adjust=False).mean().to_numpy()
+
+    # 5. Swing High/Low 20
+    swing_h20 = pd.Series(h, index=df.index).shift(1).rolling(20, min_periods=1).max().to_numpy()
+    swing_l20 = pd.Series(l, index=df.index).shift(1).rolling(20, min_periods=1).min().to_numpy()
+
+    candle_body = c - o
+    candle_range = np.maximum(1e-9, h - l)
+    upper_wick = h - np.maximum(c, o)
+    lower_wick = np.minimum(c, o) - l
+
+    # Alignment
+    is_bull_align = (ema8 > ema21) & (ema21 > ema50)
+    is_bear_align = (ema8 < ema21) & (ema21 < ema50)
+
+    # Pocket & Rejection
+    bull_in_pocket = (l <= ema8 + 1.2 * pip) & (c >= ema21 - 2.0 * pip)
+    bear_in_pocket = (h >= ema8 - 1.2 * pip) & (c <= ema21 + 2.0 * pip)
+
+    valid_candle_size = candle_range >= (0.45 * atr)
+    is_bull_rejection = valid_candle_size & (
+        (lower_wick >= 0.35 * candle_range) |
+        ((candle_body > 0) & ((c - o) >= 0.50 * candle_range) & (c > ema8))
+    )
+    is_bear_rejection = valid_candle_size & (
+        (upper_wick >= 0.35 * candle_range) |
+        ((candle_body < 0) & ((o - c) >= 0.50 * candle_range) & (c < ema8))
+    )
+
+    # Direction preference filter
+    direction_pref = str(getattr(p, "scalping_direction", "BOTH") or "BOTH").upper()
+    allow_buy = direction_pref in ("BOTH", "BUY_ONLY")
+    allow_sell = direction_pref in ("BOTH", "SELL_ONLY")
+
+    # Filters
+    buy_ok = allow_buy & (
+        is_bull_align &
+        (adx >= 20.0) &
+        (ema21_slope >= 0.20) &
+        (rsi <= 68.0) &
+        (swing_h20 - c >= 1.0 * atr) &
+        ((c - ema8) <= 2.0 * atr) &
+        bull_in_pocket &
+        is_bull_rejection
+    )
+
+    sell_ok = allow_sell & (
+        is_bear_align &
+        (adx >= 20.0) &
+        (ema21_slope <= -0.20) &
+        (rsi >= 32.0) &
+        (c - swing_l20 >= 1.0 * atr) &
+        ((ema8 - c) <= 2.0 * atr) &
+        bear_in_pocket &
+        is_bear_rejection
+    )
+
+    side = np.where(buy_ok, 1, np.where(sell_ok, -1, 0))
+    side[:50] = 0
+
+    target_usd = float(getattr(p, "target_profit_usd", 5.0) or 5.0)
+    loss_usd = float(getattr(p, "target_loss_usd", 5.0) or 5.0)
+    lot = float(getattr(p, "scalping_lot", 0.1) or 0.1)
+    # 0.1 lot on Gold ($1 per pip): $5 target = 5 pips
+    target_pips = max(5.0, target_usd / (lot * 10.0) if lot > 0 else 10.0)
+    loss_pips = max(5.0, loss_usd / (lot * 10.0) if lot > 0 else 10.0)
+
+    sl = np.where(side == 1, c - loss_pips * pip, np.where(side == -1, c + loss_pips * pip, np.nan))
+    tp = np.where(side == 1, c + target_pips * pip, np.where(side == -1, c - target_pips * pip, np.nan))
+
+    return pd.DataFrame({"side": side, "sl": sl, "tp": tp}, index=df.index)
+
+
+def _generate_fibo_signals(df: pd.DataFrame, p: StrategyParams) -> pd.DataFrame:
+    """Implementasi Fibonacci Swing Structure (Tahap 2)."""
     htf = resample_ohlc(df, p.htf_rule)
     info = align_htf(df, htf_structure(htf, p.pivot_k))
 
@@ -201,3 +327,12 @@ def generate_signals(df: pd.DataFrame, p: StrategyParams) -> pd.DataFrame:
         )
 
     return pd.DataFrame({"side": side, "sl": sl, "tp": tp}, index=df.index)
+
+
+def generate_signals(df: pd.DataFrame, p: StrategyParams) -> pd.DataFrame:
+    """Kembalikan DataFrame side (1 buy, -1 sell, 0 tidak ada), sl, tp per candle."""
+    tech = getattr(p, "active_technique", "FIBO")
+    sl_mode = getattr(p, "sl_mode", "")
+    if tech == "EMA_TREND" and sl_mode not in ("structure", "candle"):
+        return generate_ema_trend_signals(df, p)
+    return _generate_fibo_signals(df, p)
