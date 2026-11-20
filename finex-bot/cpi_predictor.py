@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("finex.cpi_predictor")
 
-CPI_CONFIG_FILE = r"d:\BigBoz\FinexTrade\finex-bot\data\cpi_sniper_config.json"
+CPI_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "data", "cpi_sniper_config.json")
 
 # =========================================================================
 # 1. DATA KALIBRASI PROYEKSI US PPI (PRODUCER PRICE INDEX) - RILIS MALAM INI

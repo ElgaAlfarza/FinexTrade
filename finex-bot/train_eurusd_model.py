@@ -23,8 +23,8 @@ from sklearn.ensemble import BaggingRegressor, RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
-DATA_PATH = r"d:\BigBoz\FinexTrade\finex-bot\data\EURUSD_M5.csv"
-OUTPUT_STATE = r"d:\BigBoz\FinexTrade\finex-bot\data\eurusd_model_state.json"
+DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "EURUSD_M5.csv")
+OUTPUT_STATE = os.path.join(os.path.dirname(__file__), "data", "eurusd_model_state.json")
 
 
 def generate_eurusd_features(df: pd.DataFrame) -> pd.DataFrame:

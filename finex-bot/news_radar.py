@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger("finex.news_radar")
 
 CALENDAR_FEED_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-CACHE_FILE = r"d:\BigBoz\FinexTrade\finex-bot\data\economic_calendar_cache.json"
+CACHE_FILE = os.path.join(os.path.dirname(__file__), "data", "economic_calendar_cache.json")
 
 # Panduan Reaksi Pasar terhadap Indikator Ekonomi Utama
 MACRO_REACTION_GUIDE = {

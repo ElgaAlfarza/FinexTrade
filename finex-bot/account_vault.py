@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("finex.account_vault")
 
-VAULT_FILE = r"d:\BigBoz\FinexTrade\finex-bot\data\accounts_vault.json"
+VAULT_FILE = os.path.join(os.path.dirname(__file__), "data", "accounts_vault.json")
 
 DEFAULT_VAULT = {
     "active_account_id": "finex_demo",

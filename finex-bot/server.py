@@ -1257,7 +1257,7 @@ def run_dataset_training(limit: int = 200000, train_ratio: float = 0.90):
 @app.get("/api/model/eurusd")
 async def get_eurusd_model_info():
     """Mengembalikan informasi arsitektur, parameter, dan metrik model EURUSD hasil latih notebook."""
-    state_path = r"d:\BigBoz\FinexTrade\finex-bot\data\eurusd_model_state.json"
+    state_path = os.path.join(os.path.dirname(__file__), "data", "eurusd_model_state.json")
     if not os.path.exists(state_path):
         return {"success": False, "message": "Model EURUSD belum dilatih"}
     try:

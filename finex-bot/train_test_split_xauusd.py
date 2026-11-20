@@ -19,9 +19,9 @@ import pandas as pd
 
 from learner import Learner, FEATS
 
-DATA_PATH = r"d:\BigBoz\FinexTrade\finex-bot\data\historical_xauusd\XAU_5m_data.csv"
-STATE_OUT = r"d:\BigBoz\FinexTrade\finex-bot\learner_state.json"
-REPORT_OUT = r"d:\BigBoz\FinexTrade\finex-bot\data\train_test_evaluation_report.json"
+DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "historical_xauusd", "XAU_5m_data.csv")
+STATE_OUT = os.path.join(os.path.dirname(__file__), "data", "learner_state.json")
+REPORT_OUT = os.path.join(os.path.dirname(__file__), "data", "train_test_evaluation_report.json")
 
 
 def run_train_test_split(sample_size: int = 200000, train_ratio: float = 0.90) -> dict:
@@ -80,7 +80,7 @@ def run_train_test_split(sample_size: int = 200000, train_ratio: float = 0.90) -
     # 3. FASE 1: PELATIHAN PADA 90% DATA LATIH
     print(f"\n[2] MEMULAI PELATIHAN MODEL PADA 90% DATA LATIH...")
     # Gunakan file temporary untuk isolasi
-    temp_state = r"d:\BigBoz\FinexTrade\finex-bot\data\learner_train_temp.json"
+    temp_state = os.path.join(os.path.dirname(__file__), "data", "learner_train_temp.json")
     if os.path.exists(temp_state):
         os.remove(temp_state)
     learner = Learner(temp_state)

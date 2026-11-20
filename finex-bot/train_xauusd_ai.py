@@ -15,9 +15,9 @@ import pandas as pd
 
 from learner import Learner, FEATS
 
-DATA_PATH = r"d:\BigBoz\FinexTrade\finex-bot\data\historical_xauusd\XAU_5m_data.csv"
-STATE_OUT = r"d:\BigBoz\FinexTrade\finex-bot\learner_state.json"
-BACKUP_OUT = r"d:\BigBoz\FinexTrade\finex-bot\data\learner_state_xau_master.json"
+DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "historical_xauusd", "XAU_5m_data.csv")
+STATE_OUT = os.path.join(os.path.dirname(__file__), "data", "learner_state.json")
+BACKUP_OUT = os.path.join(os.path.dirname(__file__), "data", "learner_state_xau_master.json")
 
 
 def train_model(sample_limit: int = 150000) -> dict:

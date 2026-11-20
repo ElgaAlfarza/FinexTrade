@@ -740,12 +740,50 @@ class MT5Executor(IExecutor):
             step = float(getattr(info, "volume_step", 0.01) or 0.01) if info else 0.01
             vmin = float(getattr(info, "volume_min", 0.01) or 0.01) if info else 0.01
             vmax = float(getattr(info, "volume_max", 100.0) or 100.0) if info else 100.0
+
+            # Validasi Stop Loss Wajib (Aturan Keras Algoritmik)
+            if sl is None or float(sl) <= 0:
+                self.last_order_error = "Order DITOLAK: Stop Loss wajib ditentukan (dilarang membuka posisi tanpa SL)."
+                logger.error(f"[MT5] {self.last_order_error}")
+                return None
+
+            # Validasi Ukuran Lot
+            if lots is None or float(lots) <= 0:
+                self.last_order_error = "Order DITOLAK: Ukuran lot 0 atau negatif (risiko melebihi batas modal)."
+                logger.error(f"[MT5] {self.last_order_error}")
+                return None
+            if float(lots) < vmin:
+                self.last_order_error = f"Order DITOLAK: Ukuran lot terhitung ({lots}) di bawah lot minimum broker ({vmin})."
+                logger.warning(f"[MT5] {self.last_order_error}")
+                return None
+
             norm_lots = round(min(max(math.floor(float(lots) / step + 1e-9) * step, vmin), vmax), 4)
-            norm_sl = round(float(sl), digits) if sl and sl > 0 else 0.0
-            norm_tp = round(float(tp), digits) if tp and tp > 0 else 0.0
+            norm_sl = round(float(sl), digits)
+            norm_tp = round(float(tp), digits) if tp and float(tp) > 0 else 0.0
+
+            # Validasi stops_level / freeze_level broker
+            stops_level = getattr(info, "trade_stops_level", 0) or 0
+            freeze_level = getattr(info, "trade_freeze_level", 0) or 0
+            point = getattr(info, "point", 0.01) or 0.01
+            min_dist = max(stops_level, freeze_level) * point
 
             price = tick.ask if side == "BUY" else tick.bid
             order_type = self.mt5.ORDER_TYPE_BUY if side == "BUY" else self.mt5.ORDER_TYPE_SELL
+
+            if min_dist > 0:
+                if abs(price - norm_sl) < min_dist:
+                    logger.warning(f"[MT5] Jarak SL ({abs(price - norm_sl):.{digits}f}) lebih kecil dari stops_level ({min_dist:.{digits}f}). Menyesuaikan SL ke batas aman.")
+                    if side == "BUY":
+                        norm_sl = round(price - min_dist - (2 * point), digits)
+                    else:
+                        norm_sl = round(price + min_dist + (2 * point), digits)
+
+                if norm_tp > 0 and abs(price - norm_tp) < min_dist:
+                    logger.warning(f"[MT5] Jarak TP ({abs(price - norm_tp):.{digits}f}) lebih kecil dari stops_level ({min_dist:.{digits}f}). Menyesuaikan TP ke batas aman.")
+                    if side == "BUY":
+                        norm_tp = round(price + min_dist + (2 * point), digits)
+                    else:
+                        norm_tp = round(price - min_dist - (2 * point), digits)
 
             # --- SMART CAPITAL ADAPTATION (PENYESUAIAN LOT OTOMATIS SESUAI MODAL) ---
             acc_info = self.mt5.account_info()
@@ -1113,7 +1151,11 @@ class OrderManager:
 
         # Hitung ukuran lot berdasarkan risiko % modal + spesifikasi broker live
         acc = self.executor.get_account_info()
-        equity = acc.get("equity", 10000.0)
+        equity = float(acc.get("equity", 0.0) or 0.0)
+        if equity <= 0:
+            self.log("EKSEKUSI DITOLAK: Informasi ekuitas akun tidak tersedia atau 0 (fail-closed).", "WARNING")
+            return None
+
         specs = self.executor.get_symbol_trade_specs(symbol, pip, current_price)
         pip_val = specs["pip_value"]
         digits = specs["digits"]
@@ -1130,13 +1172,8 @@ class OrderManager:
         )
 
         if lots <= 0:
-            free_margin = float(acc.get("free_margin", equity) or equity)
-            if equity <= 100.0 and free_margin >= 2.0:
-                lots = specs["min_lot"]
-                self.log(f"LOT ADAPTIF MIKRO: Saldo kecil (${equity:.2f}), menggunakan lot minimum broker ({lots} Lot).", "INFO")
-            else:
-                self.log(f"LOT FILTER: Ukuran lot 0 (ekuitas ${equity} tidak mencukupi untuk risiko {self.params.risk_pct}% pada SL {risk_pips:.1f} pip).", "WARNING")
-                return None
+            self.log(f"LOT FILTER: Ukuran lot 0 (ekuitas ${equity:.2f} tidak mencukupi untuk risiko {self.params.risk_pct}% pada SL {risk_pips:.1f} pip). Order dibatalkan.", "WARNING")
+            return None
 
         # 5. Eksekusi Order
         side_str = "BUY" if side == 1 else "SELL"
@@ -1215,10 +1252,13 @@ class OrderManager:
         equity = float(acc.get("equity", 100.0) or 100.0)
         free_margin = float(acc.get("free_margin", equity) or equity)
 
-        # Sesuaikan dengan batasan teknis broker (step, min_lot, max_lot)
+        # Validasi ukuran lot terhadap batasan broker (tanpa memaksakan secara diam-diam)
+        if lot is None or float(lot) <= 0 or float(lot) < min_l:
+            self.log(f"LOT FILTER: Ukuran lot ({lot}) di bawah batas minimum broker ({min_l}). Order dibatalkan.", "WARNING")
+            return None
         if step_l > 0:
-            lot = round(round(lot / step_l) * step_l, 2)
-        lot = max(min_l, min(max_l, lot))
+            lot = round(math.floor(float(lot) / step_l + 1e-9) * step_l, 4)
+        lot = min(max_l, lot)
 
         side_str = "BUY" if side == 1 else "SELL"
 
@@ -1234,10 +1274,10 @@ class OrderManager:
                 return None
             elif free_margin > 0 and req_m > free_margin * 0.90:
                 self.log(
-                    f"💡 ADAPTASI MODAL: Lot disesuaikan otomatis dari {lot} ke {min_l} lot sesuai sisa margin (${free_margin:.2f}).",
-                    "INFO"
+                    f"💰 MARGIN TIDAK CUKUP: Free Margin (${free_margin:.2f}) tidak mencukupi untuk membuka {lot} lot {symbol} (syarat: ${req_m:.2f}). Order dibatalkan.",
+                    "WARNING"
                 )
-                lot = min_l
+                return None
 
         pos = self.executor.open_trade(
             symbol=symbol,

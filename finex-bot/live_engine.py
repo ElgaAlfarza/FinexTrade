@@ -193,7 +193,8 @@ class LiveBotEngine:
                     logger.info(f"Terhubung ke terminal MetaTrader 5 ({acc_type.upper()})!")
                     return MT5Executor(session)
             except Exception as e:
-                logger.warning(f"Koneksi MT5 gagal ({e}). Otomatis beralih ke Paper Trading Simulator.")
+                logger.error(f"Inisialisasi MT5 gagal ({e}). Beralih ke Paper Trading Virtual Simulator (koneksi broker tidak aktif).")
+                self.use_paper = True
 
         logger.info("Menggunakan Paper Trading Simulator.")
         return PaperExecutor(initial_balance=10000.0)
@@ -1038,10 +1039,16 @@ class LiveBotEngine:
         ask: Optional[float] = None,
         technique: Optional[str] = None,
         _is_nested_all: bool = False,
+        closed_only: bool = True,
     ) -> dict:
         """Hitung sinyal rekomendasi live saat ini (Arah BUY/SELL, Entry, TP, SL, Confidence). Mendukung multi-pair."""
         sym = (symbol or self.symbol).upper()
-        df = self.df_candles if (df is None and sym == self.symbol) else df
+        raw_df = self.df_candles if (df is None and sym == self.symbol) else df
+
+        # Anti-Repainting: jika data menyertakan candle yang sedang berjalan (bar 0),
+        # evaluasi indikator teknikal murni pada candle yang telah selesai tutup.
+        eval_df = raw_df.iloc[:-1] if (closed_only and raw_df is not None and len(raw_df) >= 21) else raw_df
+
         digits = symbol_decimals(sym)
         pip = get_symbol_pip_size(sym)
         target_usd = float(getattr(self.params, "target_profit_usd", 5.0) or 5.0)
@@ -1073,7 +1080,7 @@ class LiveBotEngine:
         elif sym == self.symbol:
             cur_bid, cur_ask = self.current_bid, self.current_ask
         else:
-            cur_bid = float(df["close"].iloc[-1]) if df is not None and len(df) > 0 else float(SYMBOL_SPECS.get(sym, {}).get("default_price", 1.0))
+            cur_bid = float(raw_df["close"].iloc[-1]) if raw_df is not None and len(raw_df) > 0 else float(SYMBOL_SPECS.get(sym, {}).get("default_price", 1.0))
             cur_ask = cur_bid + (float(SYMBOL_SPECS.get(sym, {}).get("spread_pips", self.params.spread_pips)) * pip)
 
         spread_p = max(0.1, round((cur_ask - cur_bid) / pip, 2)) if pip > 0 else 1.0
@@ -1081,6 +1088,26 @@ class LiveBotEngine:
         direction_mode = str(getattr(self.params, "scalping_direction", "BOTH") or "BOTH").upper()
         active_tech = "EMA_TREND"
         tech_meta = AVAILABLE_TECHNIQUES.get("EMA_TREND", {})
+
+        # Fail-closed: jika data candle belum mencukupi (minimal 20 bar selesai), tolak entri!
+        if eval_df is None or len(eval_df) < 20:
+            count_bars = len(eval_df) if eval_df is not None else 0
+            return {
+                "action": "WAIT",
+                "conf": 0.0,
+                "reason": f"[{tech_meta.get('short_name', 'EMA Trend')}] Data candle belum mencukupi ({count_bars}/20 bar)",
+                "symbol": sym,
+                "technique": "EMA_TREND",
+                "entry": cur_ask,
+                "sl": 0.0,
+                "tp": 0.0,
+                "sl_pips": 0.0,
+                "tp_pips": 0.0,
+                "lot": 0.0,
+                "risk_usd": 0.0,
+                "target_usd": 0.0,
+                "spread_pips": spread_p,
+            }
 
         action = "WAIT"
         conf = 50.0
@@ -1092,309 +1119,307 @@ class LiveBotEngine:
         ema50 = cur_bid
         news_info_local = None
 
-        if df is not None and len(df) >= 20:
-            c = df["close"]
-            o = df["open"]
-            h = df["high"]
-            l = df["low"]
+        c = eval_df["close"]
+        o = eval_df["open"]
+        h = eval_df["high"]
+        l = eval_df["low"]
 
-            last_c = float(c.iloc[-1])
-            last_o = float(o.iloc[-1])
-            last_h = float(h.iloc[-1])
-            last_l = float(l.iloc[-1])
+        last_c = float(c.iloc[-1])
+        last_o = float(o.iloc[-1])
+        last_h = float(h.iloc[-1])
+        last_l = float(l.iloc[-1])
 
-            candle_body = last_c - last_o
-            candle_range = max(1e-9, last_h - last_l)
-            upper_wick = last_h - max(last_c, last_o)
-            lower_wick = min(last_c, last_o) - last_l
+        candle_body = last_c - last_o
+        candle_range = max(1e-9, last_h - last_l)
+        upper_wick = last_h - max(last_c, last_o)
+        lower_wick = min(last_c, last_o) - last_l
 
-            # 1. EXPONENTIAL MOVING AVERAGE (EMA 8 / 21 / 50 RIBBON)
-            ema8_series = c.ewm(span=8, adjust=False).mean()
-            ema21_series = c.ewm(span=21, adjust=False).mean()
-            ema50_series = c.ewm(span=50, adjust=False).mean() if len(c) >= 50 else ema21_series
+        # 1. EXPONENTIAL MOVING AVERAGE (EMA 8 / 21 / 50 RIBBON)
+        ema8_series = c.ewm(span=8, adjust=False).mean()
+        ema21_series = c.ewm(span=21, adjust=False).mean()
+        ema50_series = c.ewm(span=50, adjust=False).mean() if len(c) >= 50 else ema21_series
 
-            ema8 = float(ema8_series.iloc[-1])
-            ema21 = float(ema21_series.iloc[-1])
-            ema50 = float(ema50_series.iloc[-1])
+        ema8 = float(ema8_series.iloc[-1])
+        ema21 = float(ema21_series.iloc[-1])
+        ema50 = float(ema50_series.iloc[-1])
 
-            ema8_prev = float(ema8_series.iloc[-2]) if len(ema8_series) >= 2 else ema8
-            ema21_prev = float(ema21_series.iloc[-2]) if len(ema21_series) >= 2 else ema21
-            ema50_prev = float(ema50_series.iloc[-2]) if len(ema50_series) >= 2 else ema50
+        ema8_prev = float(ema8_series.iloc[-2]) if len(ema8_series) >= 2 else ema8
+        ema21_prev = float(ema21_series.iloc[-2]) if len(ema21_series) >= 2 else ema21
+        ema50_prev = float(ema50_series.iloc[-2]) if len(ema50_series) >= 2 else ema50
 
-            # Slope (Kemiringan Garis) dalam Pips
-            ema8_slope = (ema8 - ema8_prev) / pip
-            ema21_slope = (ema21 - ema21_prev) / pip
+        # Slope (Kemiringan Garis) dalam Pips
+        ema8_slope = (ema8 - ema8_prev) / pip
+        ema21_slope = (ema21 - ema21_prev) / pip
 
-            # True Range & ATR (14 Periode)
-            tr_series = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
-            atr = float(tr_series.tail(14).mean()) if len(tr_series) >= 14 else max(candle_range, 5.0 * pip)
-            atr = max(atr, 2.0 * pip)
+        # True Range & ATR (14 Periode)
+        tr_series = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+        atr = float(tr_series.tail(14).mean()) if len(tr_series) >= 14 else max(candle_range, 5.0 * pip)
+        atr = max(atr, 2.0 * pip)
 
-            # 2. RELATIVE STRENGTH INDEX (RSI 14) - Filter Jenuh Beli / Jual (Exhaustion Gate)
-            delta = c.diff()
-            gain = delta.clip(lower=0)
-            loss = -delta.clip(upper=0)
-            avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-            avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-            rs = avg_gain / (avg_loss + 1e-9)
-            rsi_series = 100.0 - (100.0 / (1.0 + rs))
-            rsi_val = float(rsi_series.iloc[-1]) if len(rsi_series) > 0 else 50.0
+        # 2. RELATIVE STRENGTH INDEX (RSI 14) - Filter Jenuh Beli / Jual (Exhaustion Gate)
+        delta = c.diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+        rs = avg_gain / (avg_loss + 1e-9)
+        rsi_series = 100.0 - (100.0 / (1.0 + rs))
+        rsi_val = float(rsi_series.iloc[-1]) if len(rsi_series) > 0 else 50.0
 
-            # 3. AVERAGE DIRECTIONAL INDEX (ADX 14) - Filter Anti-Sideways / Anti-Chop Gate
-            up_move = h.diff()
-            down_move = -l.diff()
-            plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-            minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-            tr_smooth = tr_series.ewm(alpha=1/14, adjust=False).mean()
-            plus_di = 100.0 * (pd.Series(plus_dm, index=df.index).ewm(alpha=1/14, adjust=False).mean() / (tr_smooth + 1e-9))
-            minus_di = 100.0 * (pd.Series(minus_dm, index=df.index).ewm(alpha=1/14, adjust=False).mean() / (tr_smooth + 1e-9))
-            dx = 100.0 * ((plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9))
-            adx_series = dx.ewm(alpha=1/14, adjust=False).mean()
-            adx_val = float(adx_series.iloc[-1]) if len(adx_series) > 0 else 25.0
+        # 3. AVERAGE DIRECTIONAL INDEX (ADX 14) - Filter Anti-Sideways / Anti-Chop Gate
+        up_move = h.diff()
+        down_move = -l.diff()
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        tr_smooth = tr_series.ewm(alpha=1/14, adjust=False).mean()
+        plus_di = 100.0 * (pd.Series(plus_dm, index=eval_df.index).ewm(alpha=1/14, adjust=False).mean() / (tr_smooth + 1e-9))
+        minus_di = 100.0 * (pd.Series(minus_dm, index=eval_df.index).ewm(alpha=1/14, adjust=False).mean() / (tr_smooth + 1e-9))
+        dx = 100.0 * ((plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9))
+        adx_series = dx.ewm(alpha=1/14, adjust=False).mean()
+        adx_val = float(adx_series.iloc[-1]) if len(adx_series) > 0 else 25.0
 
-            # 4. HORIZONTAL SWING S/R (High/Low 20 Candle) - Room-to-Move Filter
-            swing_h20 = float(h.iloc[-21:-1].max()) if len(h) >= 21 else (last_c + 10.0 * pip)
-            swing_l20 = float(l.iloc[-21:-1].min()) if len(l) >= 21 else (last_c - 10.0 * pip)
-            room_to_res = swing_h20 - last_c
-            room_to_sup = last_c - swing_l20
+        # 4. HORIZONTAL SWING S/R (High/Low 20 Candle) - Room-to-Move Filter
+        swing_h20 = float(h.iloc[-21:-1].max()) if len(h) >= 21 else (last_c + 10.0 * pip)
+        swing_l20 = float(l.iloc[-21:-1].min()) if len(l) >= 21 else (last_c - 10.0 * pip)
+        room_to_res = swing_h20 - last_c
+        room_to_sup = last_c - swing_l20
 
-            # Kondisi Susunan Ribbon (Alignment Arus Utama)
-            is_bull_align = (ema8 > ema21 and ema21 > ema50)
-            is_bear_align = (ema8 < ema21 and ema21 < ema50)
+        # Kondisi Susunan Ribbon (Alignment Arus Utama)
+        is_bull_align = (ema8 > ema21 and ema21 > ema50)
+        is_bear_align = (ema8 < ema21 and ema21 < ema50)
 
-            # Filter Konteks Makro M15 (EMA 50 M15 setara ~EMA 150 M5)
-            ema_m15_50 = float(c.ewm(span=min(len(c), 150), adjust=False).mean().iloc[-1])
-            m15_bullish = (last_c >= ema_m15_50)
-            m15_bearish = (last_c <= ema_m15_50)
+        # Filter Konteks Makro M15 (EMA 50 M15 setara ~EMA 150 M5)
+        ema_m15_50 = float(c.ewm(span=min(len(c), 150), adjust=False).mean().iloc[-1])
+        m15_bullish = (last_c >= ema_m15_50)
+        m15_bearish = (last_c <= ema_m15_50)
 
-            # Crossover Dinamis
-            fresh_golden_cross = (ema8 >= ema21 and ema8_prev < ema21_prev)
-            fresh_death_cross = (ema8 <= ema21 and ema8_prev > ema21_prev)
+        # Crossover Dinamis
+        fresh_golden_cross = (ema8 >= ema21 and ema8_prev < ema21_prev)
+        fresh_death_cross = (ema8 <= ema21 and ema8_prev > ema21_prev)
 
-            # Jarak Harga ke EMA 8 (Filter Overextension / Anti-Chasing Pucuk & Lembah)
-            overextended_bull = (last_c - ema8) > (2.0 * atr)
-            overextended_bear = (ema8 - last_c) > (2.0 * atr)
+        # Jarak Harga ke EMA 8 (Filter Overextension / Anti-Chasing Pucuk & Lembah)
+        overextended_bull = (last_c - ema8) > (2.0 * atr)
+        overextended_bear = (ema8 - last_c) > (2.0 * atr)
 
-            # Pullback & Rejection Zone (Dynamic S/R antara EMA 8 dan EMA 21)
-            bull_in_pocket = (last_l <= ema8 + 1.2 * pip) and (last_c >= ema21 - 2.0 * pip)
-            bear_in_pocket = (last_h >= ema8 - 1.2 * pip) and (last_c <= ema21 + 2.0 * pip)
+        # Pullback & Rejection Zone (Dynamic S/R antara EMA 8 dan EMA 21)
+        bull_in_pocket = (last_l <= ema8 + 1.2 * pip) and (last_c >= ema21 - 2.0 * pip)
+        bear_in_pocket = (last_h >= ema8 - 1.2 * pip) and (last_c <= ema21 + 2.0 * pip)
 
-            # Konfirmasi Kualitas Candle: Minimal Range 0.45 ATR & Rejection Wick >= 35% atau Engulfing Kuat (Body >= 50%)
-            valid_candle_size = candle_range >= (0.45 * atr)
-            is_bull_rejection = valid_candle_size and (
-                (lower_wick >= 0.35 * candle_range) or
-                (candle_body > 0 and (last_c - last_o) >= 0.50 * candle_range and last_c > ema8)
-            )
-            is_bear_rejection = valid_candle_size and (
-                (upper_wick >= 0.35 * candle_range) or
-                (candle_body < 0 and (last_o - last_c) >= 0.50 * candle_range and last_c < ema8)
-            )
+        # Konfirmasi Kualitas Candle: Minimal Range 0.45 ATR & Rejection Wick >= 35% atau Engulfing Kuat (Body >= 50%)
+        valid_candle_size = candle_range >= (0.45 * atr)
+        is_bull_rejection = valid_candle_size and (
+            (lower_wick >= 0.35 * candle_range) or
+            (candle_body > 0 and (last_c - last_o) >= 0.50 * candle_range and last_c > ema8)
+        )
+        is_bear_rejection = valid_candle_size and (
+            (upper_wick >= 0.35 * candle_range) or
+            (candle_body < 0 and (last_o - last_c) >= 0.50 * candle_range and last_c < ema8)
+        )
 
-            if is_bull_align or fresh_golden_cross:
-                if not m15_bullish:
-                    action = "WAIT"
-                    conf = 55.0
-                    reason = f"⏳ Filter Makro M15: Harga di bawah EMA 50 M15 ({ema_m15_50:.{digits}f}). Dilarang BUY melawan tren makro (Hindari Bull-Trap)."
-                elif adx_val < 20.0:
-                    action = "WAIT"
-                    conf = 50.0
-                    reason = f"⏳ Filter Anti-Chop: ADX rendah ({adx_val:.1f} < 20). Pasar sedang sideways / tanpa tren. Dilarang entry MA untuk cegah whipsaw."
-                elif ema21_slope < 0.20:
-                    action = "WAIT"
-                    conf = 52.0
-                    reason = f"⏳ Filter Momentum (Slope): Sudut EMA 21 mendatar ({ema21_slope:+.2f}p). Dorongan tren naik belum cukup kuat."
-                elif rsi_val > 68.0:
-                    action = "WAIT"
-                    conf = 54.0
-                    reason = f"⏳ Filter RSI Exhaustion: RSI jenuh beli ({rsi_val:.1f} > 68). Risiko tinggi buying the top / koreksi tajam."
-                elif room_to_res < (1.0 * atr):
-                    action = "WAIT"
-                    conf = 53.0
-                    reason = f"⏳ Filter Ruang Gerak S/R: Harga terlalu dekat dengan Resistance Swing High ({swing_h20:.{digits}f}, sisa {room_to_res/pip:.1f}p). Ruang gerak sempit."
-                elif overextended_bull:
-                    action = "WAIT"
-                    conf = 58.0
-                    reason = f"⏳ EMA Trend: Harga overextended (+{(last_c - ema8)/pip:.1f} pip dari EMA 8). Menunggu pullback sehat ke zona EMA 8/21 sebelum BUY."
-                elif bull_in_pocket and is_bull_rejection:
-                    action = "BUY"
-                    conf = 92.0
-                    reason = f"📈 EMA Trend BUY [A+ Retest]: Pullback ke Dynamic Support (EMA 8/21) & Rejection Bullish ({ema8:.{digits}f}) | ADX kuat ({adx_val:.1f}) & RSI sehat ({rsi_val:.1f})."
-                elif fresh_golden_cross and candle_body > (0.45 * candle_range) and last_c > ema8 and ema8_slope > 0.35:
-                    action = "BUY"
-                    conf = 88.0
-                    reason = f"🚀 EMA Trend BUY [Golden Cross]: EMA 8 menembus ke atas EMA 21 dengan candle bullish impulsif ({last_c:.{digits}f}) | ADX: {adx_val:.1f}."
-                else:
-                    action = "WAIT"
-                    conf = 52.0
-                    reason = f"⏳ EMA Trend: Harga belum menyentuh Dynamic Support EMA 8/21 atau belum ada candle rejection valid (Disiplin WAIT)."
-
-            elif is_bear_align or fresh_death_cross:
-                if not m15_bearish:
-                    action = "WAIT"
-                    conf = 55.0
-                    reason = f"⏳ Filter Makro M15: Harga di atas EMA 50 M15 ({ema_m15_50:.{digits}f}). Dilarang SELL melawan tren makro (Hindari Bear-Trap)."
-                elif adx_val < 20.0:
-                    action = "WAIT"
-                    conf = 50.0
-                    reason = f"⏳ Filter Anti-Chop: ADX rendah ({adx_val:.1f} < 20). Pasar sedang sideways / tanpa tren. Dilarang entry MA untuk cegah whipsaw."
-                elif ema21_slope > -0.20:
-                    action = "WAIT"
-                    conf = 52.0
-                    reason = f"⏳ Filter Momentum (Slope): Sudut EMA 21 mendatar ({ema21_slope:+.2f}p). Dorongan tren turun belum cukup kuat."
-                elif rsi_val < 32.0:
-                    action = "WAIT"
-                    conf = 54.0
-                    reason = f"⏳ Filter RSI Exhaustion: RSI jenuh jual ({rsi_val:.1f} < 32). Risiko tinggi selling the bottom / pantulan tajam."
-                elif room_to_sup < (1.0 * atr):
-                    action = "WAIT"
-                    conf = 53.0
-                    reason = f"⏳ Filter Ruang Gerak S/R: Harga terlalu dekat dengan Support Swing Low ({swing_l20:.{digits}f}, sisa {room_to_sup/pip:.1f}p). Ruang gerak sempit."
-                elif overextended_bear:
-                    action = "WAIT"
-                    conf = 58.0
-                    reason = f"⏳ EMA Trend: Harga overextended (-{(ema8 - last_c)/pip:.1f} pip dari EMA 8). Menunggu koreksi naik ke zona EMA 8/21 sebelum SELL."
-                elif bear_in_pocket and is_bear_rejection:
-                    action = "SELL"
-                    conf = 92.0
-                    reason = f"📉 EMA Trend SELL [A+ Retest]: Pullback ke Dynamic Resistance (EMA 8/21) & Rejection Bearish ({ema8:.{digits}f}) | ADX kuat ({adx_val:.1f}) & RSI sehat ({rsi_val:.1f})."
-                elif fresh_death_cross and candle_body < -(0.45 * candle_range) and last_c < ema8 and ema8_slope < -0.35:
-                    action = "SELL"
-                    conf = 88.0
-                    reason = f"🩸 EMA Trend SELL [Death Cross]: EMA 8 menembus ke bawah EMA 21 dengan candle bearish impulsif ({last_c:.{digits}f}) | ADX: {adx_val:.1f}."
-                else:
-                    action = "WAIT"
-                    conf = 52.0
-                    reason = f"⏳ EMA Trend: Harga belum menyentuh Dynamic Resistance EMA 8/21 atau belum ada candle rejection valid (Disiplin WAIT)."
-
+        if is_bull_align or fresh_golden_cross:
+            if not m15_bullish:
+                action = "WAIT"
+                conf = 55.0
+                reason = f"⏳ Filter Makro M15: Harga di bawah EMA 50 M15 ({ema_m15_50:.{digits}f}). Dilarang BUY melawan tren makro (Hindari Bull-Trap)."
+            elif adx_val < 20.0:
+                action = "WAIT"
+                conf = 50.0
+                reason = f"⏳ Filter Anti-Chop: ADX rendah ({adx_val:.1f} < 20). Pasar sedang sideways / tanpa tren. Dilarang entry MA untuk cegah whipsaw."
+            elif ema21_slope < 0.20:
+                action = "WAIT"
+                conf = 52.0
+                reason = f"⏳ Filter Momentum (Slope): Sudut EMA 21 mendatar ({ema21_slope:+.2f}p). Dorongan tren naik belum cukup kuat."
+            elif rsi_val > 68.0:
+                action = "WAIT"
+                conf = 54.0
+                reason = f"⏳ Filter RSI Exhaustion: RSI jenuh beli ({rsi_val:.1f} > 68). Risiko tinggi buying the top / koreksi tajam."
+            elif room_to_res < (1.0 * atr):
+                action = "WAIT"
+                conf = 53.0
+                reason = f"⏳ Filter Ruang Gerak S/R: Harga terlalu dekat dengan Resistance Swing High ({swing_h20:.{digits}f}, sisa {room_to_res/pip:.1f}p). Ruang gerak sempit."
+            elif overextended_bull:
+                action = "WAIT"
+                conf = 58.0
+                reason = f"⏳ EMA Trend: Harga overextended (+{(last_c - ema8)/pip:.1f} pip dari EMA 8). Menunggu pullback sehat ke zona EMA 8/21 sebelum BUY."
+            elif bull_in_pocket and is_bull_rejection:
+                action = "BUY"
+                conf = 92.0
+                reason = f"📈 EMA Trend BUY [A+ Retest]: Pullback ke Dynamic Support (EMA 8/21) & Rejection Bullish ({ema8:.{digits}f}) | ADX kuat ({adx_val:.1f}) & RSI sehat ({rsi_val:.1f})."
+            elif fresh_golden_cross and candle_body > (0.45 * candle_range) and last_c > ema8 and ema8_slope > 0.35:
+                action = "BUY"
+                conf = 88.0
+                reason = f"🚀 EMA Trend BUY [Golden Cross]: EMA 8 menembus ke atas EMA 21 dengan candle bullish impulsif ({last_c:.{digits}f}) | ADX: {adx_val:.1f}."
             else:
                 action = "WAIT"
-                conf = 45.0
-                reason = f"⏳ EMA Trend: Moving Average konsolidasi/sideways (EMA 8: {ema8:.{digits}f}, EMA 21: {ema21:.{digits}f}, EMA 50: {ema50:.{digits}f}). Menunggu pembentukan tren searah."
+                conf = 52.0
+                reason = f"⏳ EMA Trend: Harga belum menyentuh Dynamic Support EMA 8/21 atau belum ada candle rejection valid (Disiplin WAIT)."
 
-            # Integrasi Berita & Sentimen Fundamental Makro XAUUSD (AI Gemini)
-            news_info_local = None
-            try:
-                from gemini_analyst import get_gemini_analyst
-                g_analyst = get_gemini_analyst()
-                news_info_local = g_analyst.get_xauusd_news_sentiment(force_refresh=False)
-                news_bias = str(news_info_local.get("recommended_bias", "NEUTRAL")).upper()
-                news_headline = str(news_info_local.get("headline", ""))
-                if action == "BUY" and news_bias == "BUY":
-                    conf = min(96.0, conf + 7.0)
-                    reason += f" | 📰 Berita Emas (Gemini): Sentimen Positif ({news_headline})"
-                elif action == "SELL" and news_bias == "SELL":
-                    conf = min(96.0, conf + 7.0)
-                    reason += f" | 📰 Berita Emas (Gemini): Sentimen Negatif ({news_headline})"
-            except Exception:
-                pass
-
-            # Integrasi Model Prediktif EURUSD (Bagging Regressor Ensemble dari Notebook)
-            if sym == "EURUSD" and df is not None and len(df) >= 50:
-                try:
-                    state_path = r"d:\BigBoz\FinexTrade\finex-bot\data\eurusd_model_state.json"
-                    if os.path.exists(state_path):
-                        with open(state_path, "r", encoding="utf-8") as f:
-                            m_st = json.load(f)
-                        c_vals = df["close"].astype(float).values
-                        o_vals = df["open"].astype(float).values
-                        h_vals = df["high"].astype(float).values
-                        l_vals = df["low"].astype(float).values
-                        v_vals = df["tick_volume"].astype(float).values if "tick_volume" in df.columns else np.ones(len(df))
-
-                        m8 = float(pd.Series(c_vals).rolling(8).mean().iloc[-1])
-                        m21 = float(pd.Series(c_vals).rolling(21).mean().iloc[-1])
-                        m50 = float(pd.Series(c_vals).rolling(50).mean().iloc[-1])
-                        m200 = float(pd.Series(c_vals).rolling(min(200, len(c_vals))).mean().iloc[-1])
-
-                        s8 = float(pd.Series(c_vals).rolling(8).std().iloc[-1])
-                        s21 = float(pd.Series(c_vals).rolling(21).std().iloc[-1])
-                        s50 = float(pd.Series(c_vals).rolling(50).std().iloc[-1])
-
-                        rng_e = max(float(h_vals[-1] - l_vals[-1]), 1e-6)
-
-                        f_v = [
-                            float(o_vals[-1]), float(c_vals[-1]), float(h_vals[-1]), float(l_vals[-1]), float(v_vals[-1]),
-                            (m8 / (m21 + 1e-9)) - 1.0, (m8 / (m50 + 1e-9)) - 1.0, (m21 / (m50 + 1e-9)) - 1.0, (m50 / (m200 + 1e-9)) - 1.0,
-                            (float(c_vals[-1]) - m8) / pip, (float(c_vals[-1]) - m21) / pip, (float(c_vals[-1]) - m50) / pip,
-                            s8 / (s21 + 1e-9), s21 / (s50 + 1e-9), s21 / pip,
-                            float((c_vals[-1] - c_vals[-2]) / (c_vals[-2] + 1e-9)),
-                            float((c_vals[-1] - c_vals[-6]) / (c_vals[-6] + 1e-9)) if len(c_vals) >= 6 else 0.0,
-                            float((c_vals[-1] - c_vals[-22]) / (c_vals[-22] + 1e-9)) if len(c_vals) >= 22 else 0.0,
-                            float((c_vals[-1] - c_vals[-51]) / (c_vals[-51] + 1e-9)) if len(c_vals) >= 51 else 0.0,
-                            float(v_vals[-1] / (pd.Series(v_vals).rolling(21).mean().iloc[-1] + 1e-9)),
-                            (float(c_vals[-1]) - float(o_vals[-1])) / rng_e,
-                            (float(h_vals[-1]) - max(float(c_vals[-1]), float(o_vals[-1]))) / rng_e,
-                            (min(float(c_vals[-1]), float(o_vals[-1])) - float(l_vals[-1])) / rng_e,
-                        ]
-
-                        m_mean = np.array(m_st["scaler_mean"])
-                        m_scale = np.array(m_st["scaler_scale"])
-                        m_w = np.array(m_st["weights"])
-                        m_b = float(m_st["intercept"])
-
-                        drift = float(np.dot((np.array(f_v) - m_mean) / (m_scale + 1e-9), m_w) + m_b)
-
-                        if action == "BUY":
-                            if drift < -2.0:
-                                action = "WAIT"
-                                conf = 50.0
-                                reason = f"⏳ Filter AI EURUSD: Model memprediksi drift turun ({drift:+.1f}p). Dilarang BUY melawan model regresi."
-                            elif drift > 1.2:
-                                conf = min(96.0, conf + 6.0)
-                                reason += f" | 🤖 AI EURUSD (Ensemble): Prediksi Drift Positif ({drift:+.1f}p, Akurasi: 69.1%)"
-                        elif action == "SELL":
-                            if drift > 2.0:
-                                action = "WAIT"
-                                conf = 50.0
-                                reason = f"⏳ Filter AI EURUSD: Model memprediksi drift naik ({drift:+.1f}p). Dilarang SELL melawan model regresi."
-                            elif drift < -1.2:
-                                conf = min(96.0, conf + 6.0)
-                                reason += f" | 🤖 AI EURUSD (Ensemble): Prediksi Drift Negatif ({drift:+.1f}p, Akurasi: 69.1%)"
-                except Exception as e_eur:
-                    logger.debug(f"Evaluasi model EURUSD dilewati: {e_eur}")
-
-            # Filter Pembatasan Arah Pengguna
-            if action in ("BUY", "SELL"):
-                if direction_mode == "BUY_ONLY" and action == "SELL":
-                    action = "WAIT"
-                    reason = f"Sinyal SELL diabaikan karena mode diset ke BUY SAJA"
-                elif direction_mode == "SELL_ONLY" and action == "BUY":
-                    action = "WAIT"
-                    reason = f"Sinyal BUY diabaikan karena mode diset ke SELL SAJA"
-
-                # PILAR 1: Stop Loss Tempat Merubah View (Structural Invalidation Gate)
-                loss_info = getattr(self, "last_loss_by_symbol", {}).get(sym)
-                if loss_info and action == loss_info.get("side"):
-                    l_side = loss_info.get("side")
-                    l_px = float(loss_info.get("price", 0.0) or 0.0)
-                    l_ts = float(loss_info.get("ts", 0.0) or 0.0)
-                    l_elapsed = time.time() - l_ts
-                    if l_elapsed < 600.0:
-                        action = "WAIT"
-                        conf = 45.0
-                        rem_m = int((600.0 - l_elapsed) / 60) + 1
-                        reason = f"🛑 PILAR 1 (Stop Loss Tempat Merubah View): View {l_side} dibatalkan karena kena SL di {l_px:.2f}. Cooldown disiplin {rem_m}m tersisa."
-                    elif l_side == "BUY" and last_c < (l_px + 15.0 * pip):
-                        action = "WAIT"
-                        conf = 48.0
-                        reason = f"🛑 PILAR 1 (Stop Loss Tempat Merubah View): BUY dibatalkan karena kena SL di {l_px:.2f}. Struktur belum pulih di atas {l_px + 15.0*pip:.2f}."
-                    elif l_side == "SELL" and last_c > (l_px - 15.0 * pip):
-                        action = "WAIT"
-                        conf = 48.0
-                        reason = f"🛑 PILAR 1 (Stop Loss Tempat Merubah View): SELL dibatalkan karena kena SL di {l_px:.2f}. Struktur belum pulih di bawah {l_px - 15.0*pip:.2f}."
-        else:
-            if direction_mode == "SELL_ONLY":
+        elif is_bear_align or fresh_death_cross:
+            if not m15_bearish:
+                action = "WAIT"
+                conf = 55.0
+                reason = f"⏳ Filter Makro M15: Harga di atas EMA 50 M15 ({ema_m15_50:.{digits}f}). Dilarang SELL melawan tren makro (Hindari Bear-Trap)."
+            elif adx_val < 20.0:
+                action = "WAIT"
+                conf = 50.0
+                reason = f"⏳ Filter Anti-Chop: ADX rendah ({adx_val:.1f} < 20). Pasar sedang sideways / tanpa tren. Dilarang entry MA untuk cegah whipsaw."
+            elif ema21_slope > -0.20:
+                action = "WAIT"
+                conf = 52.0
+                reason = f"⏳ Filter Momentum (Slope): Sudut EMA 21 mendatar ({ema21_slope:+.2f}p). Dorongan tren turun belum cukup kuat."
+            elif rsi_val < 32.0:
+                action = "WAIT"
+                conf = 54.0
+                reason = f"⏳ Filter RSI Exhaustion: RSI jenuh jual ({rsi_val:.1f} < 32). Risiko tinggi selling the bottom / pantulan tajam."
+            elif room_to_sup < (1.0 * atr):
+                action = "WAIT"
+                conf = 53.0
+                reason = f"⏳ Filter Ruang Gerak S/R: Harga terlalu dekat dengan Support Swing Low ({swing_l20:.{digits}f}, sisa {room_to_sup/pip:.1f}p). Ruang gerak sempit."
+            elif overextended_bear:
+                action = "WAIT"
+                conf = 58.0
+                reason = f"⏳ EMA Trend: Harga overextended (-{(ema8 - last_c)/pip:.1f} pip dari EMA 8). Menunggu koreksi naik ke zona EMA 8/21 sebelum SELL."
+            elif bear_in_pocket and is_bear_rejection:
                 action = "SELL"
-            elif direction_mode == "BUY_ONLY":
-                action = "BUY"
+                conf = 92.0
+                reason = f"📉 EMA Trend SELL [A+ Retest]: Pullback ke Dynamic Resistance (EMA 8/21) & Rejection Bearish ({ema8:.{digits}f}) | ADX kuat ({adx_val:.1f}) & RSI sehat ({rsi_val:.1f})."
+            elif fresh_death_cross and candle_body < -(0.45 * candle_range) and last_c < ema8 and ema8_slope < -0.35:
+                action = "SELL"
+                conf = 88.0
+                reason = f"🩸 EMA Trend SELL [Death Cross]: EMA 8 menembus ke bawah EMA 21 dengan candle bearish impulsif ({last_c:.{digits}f}) | ADX: {adx_val:.1f}."
             else:
-                action = "BUY" if cur_ask >= cur_bid else "SELL"
-            reason = f"[{tech_meta.get('short_name', 'EMA Trend')}] Menghitung momentum real-time"
+                action = "WAIT"
+                conf = 52.0
+                reason = f"⏳ EMA Trend: Harga belum menyentuh Dynamic Resistance EMA 8/21 atau belum ada candle rejection valid (Disiplin WAIT)."
+
+        else:
+            action = "WAIT"
+            conf = 45.0
+            reason = f"⏳ EMA Trend: Moving Average konsolidasi/sideways (EMA 8: {ema8:.{digits}f}, EMA 21: {ema21:.{digits}f}, EMA 50: {ema50:.{digits}f}). Menunggu pembentukan tren searah."
+
+        # Integrasi Berita & Sentimen Fundamental Makro XAUUSD (AI Gemini)
+        news_info_local = None
+        try:
+            from gemini_analyst import get_gemini_analyst
+            g_analyst = get_gemini_analyst()
+            news_info_local = g_analyst.get_xauusd_news_sentiment(force_refresh=False)
+            news_bias = str(news_info_local.get("recommended_bias", "NEUTRAL")).upper()
+            news_headline = str(news_info_local.get("headline", ""))
+            if action == "BUY" and news_bias == "BUY":
+                conf = min(96.0, conf + 7.0)
+                reason += f" | 📰 Berita Emas (Gemini): Sentimen Positif ({news_headline})"
+            elif action == "SELL" and news_bias == "SELL":
+                conf = min(96.0, conf + 7.0)
+                reason += f" | 📰 Berita Emas (Gemini): Sentimen Negatif ({news_headline})"
+        except Exception:
+            pass
+
+        # Integrasi Model Prediktif EURUSD (Bagging Regressor Ensemble dari Notebook)
+        if sym == "EURUSD" and df is not None and len(df) >= 50:
+            try:
+                state_path = os.path.join(os.path.dirname(__file__), "data", "eurusd_model_state.json")
+                if os.path.exists(state_path):
+                    with open(state_path, "r", encoding="utf-8") as f:
+                        m_st = json.load(f)
+                    c_vals = eval_df["close"].astype(float).values
+                    o_vals = eval_df["open"].astype(float).values
+                    h_vals = eval_df["high"].astype(float).values
+                    l_vals = eval_df["low"].astype(float).values
+                    v_vals = eval_df["tick_volume"].astype(float).values if "tick_volume" in eval_df.columns else np.ones(len(eval_df))
+
+                    m8 = float(pd.Series(c_vals).rolling(8).mean().iloc[-1])
+                    m21 = float(pd.Series(c_vals).rolling(21).mean().iloc[-1])
+                    m50 = float(pd.Series(c_vals).rolling(50).mean().iloc[-1])
+                    m200 = float(pd.Series(c_vals).rolling(min(200, len(c_vals))).mean().iloc[-1])
+
+                    s8 = float(pd.Series(c_vals).rolling(8).std().iloc[-1])
+                    s21 = float(pd.Series(c_vals).rolling(21).std().iloc[-1])
+                    s50 = float(pd.Series(c_vals).rolling(50).std().iloc[-1])
+
+                    rng_e = max(float(h_vals[-1] - l_vals[-1]), 1e-6)
+
+                    f_v = [
+                        float(o_vals[-1]), float(c_vals[-1]), float(h_vals[-1]), float(l_vals[-1]), float(v_vals[-1]),
+                        (m8 / (m21 + 1e-9)) - 1.0, (m8 / (m50 + 1e-9)) - 1.0, (m21 / (m50 + 1e-9)) - 1.0, (m50 / (m200 + 1e-9)) - 1.0,
+                        (float(c_vals[-1]) - m8) / pip, (float(c_vals[-1]) - m21) / pip, (float(c_vals[-1]) - m50) / pip,
+                        s8 / (s21 + 1e-9), s21 / (s50 + 1e-9), s21 / pip,
+                        float((c_vals[-1] - c_vals[-2]) / (c_vals[-2] + 1e-9)),
+                        float((c_vals[-1] - c_vals[-6]) / (c_vals[-6] + 1e-9)) if len(c_vals) >= 6 else 0.0,
+                        float((c_vals[-1] - c_vals[-22]) / (c_vals[-22] + 1e-9)) if len(c_vals) >= 22 else 0.0,
+                        float((c_vals[-1] - c_vals[-51]) / (c_vals[-51] + 1e-9)) if len(c_vals) >= 51 else 0.0,
+                        float(v_vals[-1] / (pd.Series(v_vals).rolling(21).mean().iloc[-1] + 1e-9)),
+                        (float(c_vals[-1]) - float(o_vals[-1])) / rng_e,
+                        (float(h_vals[-1]) - max(float(c_vals[-1]), float(o_vals[-1]))) / rng_e,
+                        (min(float(c_vals[-1]), float(o_vals[-1])) - float(l_vals[-1])) / rng_e,
+                    ]
+
+                    m_mean = np.array(m_st["scaler_mean"])
+                    m_scale = np.array(m_st["scaler_scale"])
+                    m_w = np.array(m_st["weights"])
+                    m_b = float(m_st["intercept"])
+
+                    drift = float(np.dot((np.array(f_v) - m_mean) / (m_scale + 1e-9), m_w) + m_b)
+
+                    if action == "BUY":
+                        if drift < -2.0:
+                            action = "WAIT"
+                            conf = 50.0
+                            reason = f"⏳ Filter AI EURUSD: Model memprediksi drift turun ({drift:+.1f}p). Dilarang BUY melawan model regresi."
+                        elif drift > 1.2:
+                            conf = min(96.0, conf + 6.0)
+                            reason += f" | 🤖 AI EURUSD (Ensemble): Prediksi Drift Positif ({drift:+.1f}p, Akurasi: 69.1%)"
+                    elif action == "SELL":
+                        if drift > 2.0:
+                            action = "WAIT"
+                            conf = 50.0
+                            reason = f"⏳ Filter AI EURUSD: Model memprediksi drift naik ({drift:+.1f}p). Dilarang SELL melawan model regresi."
+                        elif drift < -1.2:
+                            conf = min(96.0, conf + 6.0)
+                            reason += f" | 🤖 AI EURUSD (Ensemble): Prediksi Drift Negatif ({drift:+.1f}p, Akurasi: 69.1%)"
+            except Exception as e_eur:
+                logger.debug(f"Evaluasi model EURUSD dilewati: {e_eur}")
+
+        # Filter Pembatasan Arah Pengguna
+        if action in ("BUY", "SELL"):
+            if direction_mode == "BUY_ONLY" and action == "SELL":
+                action = "WAIT"
+                reason = f"Sinyal SELL diabaikan karena mode diset ke BUY SAJA"
+            elif direction_mode == "SELL_ONLY" and action == "BUY":
+                action = "WAIT"
+                reason = f"Sinyal BUY diabaikan karena mode diset ke SELL SAJA"
+
+            # PILAR 1: Stop Loss Tempat Merubah View (Structural Invalidation Gate)
+            loss_info = getattr(self, "last_loss_by_symbol", {}).get(sym)
+            if loss_info and action == loss_info.get("side"):
+                l_side = loss_info.get("side")
+                l_px = float(loss_info.get("price", 0.0) or 0.0)
+                l_ts = float(loss_info.get("ts", 0.0) or 0.0)
+                l_elapsed = time.time() - l_ts
+                if l_elapsed < 600.0:
+                    action = "WAIT"
+                    conf = 45.0
+                    rem_m = int((600.0 - l_elapsed) / 60) + 1
+                    reason = f"🛑 PILAR 1 (Stop Loss Tempat Merubah View): View {l_side} dibatalkan karena kena SL di {l_px:.2f}. Cooldown disiplin {rem_m}m tersisa."
+                elif l_side == "BUY" and last_c < (l_px + 15.0 * pip):
+                    action = "WAIT"
+                    conf = 48.0
+                    reason = f"🛑 PILAR 1 (Stop Loss Tempat Merubah View): BUY dibatalkan karena kena SL di {l_px:.2f}. Struktur belum pulih di atas {l_px + 15.0*pip:.2f}."
+                elif l_side == "SELL" and last_c > (l_px - 15.0 * pip):
+                    action = "WAIT"
+                    conf = 48.0
+                    reason = f"🛑 PILAR 1 (Stop Loss Tempat Merubah View): SELL dibatalkan karena kena SL di {l_px:.2f}. Struktur belum pulih di bawah {l_px - 15.0*pip:.2f}."
+        # Terapkan filter arah jika dikonfigurasi
+        if direction_mode == "BUY_ONLY" and action == "SELL":
+            action = "WAIT"
+            reason = "Disiplin Filter Arah: Mode BUY_ONLY aktif, sinyal SELL diabaikan."
+        elif direction_mode == "SELL_ONLY" and action == "BUY":
+            action = "WAIT"
+            reason = "Disiplin Filter Arah: Mode SELL_ONLY aktif, sinyal BUY diabaikan."
 
         # Kalkulasi Entry, SL, TP Proporsional (RR 1 : 1.6+ & Proteksi Noise Emas)
         if action == "BUY":
             entry = cur_ask
-            sl_anchor = min(ema50 - 2.0 * pip, last_l - 2.5 * pip) if ('ema50' in locals() and 'last_l' in locals()) else (entry - 35.0 * pip)
+            sl_anchor = min(ema50 - 2.0 * pip, last_l - 2.5 * pip)
             sl_pips = round(min(65.0, max(35.0, max(1.2 * atr / pip, (entry - sl_anchor) / pip))), 1)
             tp_pips = round(max(sl_pips * 1.6, 50.0), 1)
             tp = round(entry + tp_pips * pip, digits)
@@ -1403,7 +1428,7 @@ class LiveBotEngine:
             target_usd = round(tp_pips * dollar_per_pip, 2)
         elif action == "SELL":
             entry = cur_bid
-            sl_anchor = max(ema50 + 2.0 * pip, last_h + 2.5 * pip) if ('ema50' in locals() and 'last_h' in locals()) else (entry + 35.0 * pip)
+            sl_anchor = max(ema50 + 2.0 * pip, last_h + 2.5 * pip)
             sl_pips = round(min(65.0, max(35.0, max(1.2 * atr / pip, (sl_anchor - entry) / pip))), 1)
             tp_pips = round(max(sl_pips * 1.6, 50.0), 1)
             tp = round(entry - tp_pips * pip, digits)
@@ -1412,9 +1437,12 @@ class LiveBotEngine:
             target_usd = round(tp_pips * dollar_per_pip, 2)
         else:
             entry = cur_ask if cur_ask > 0 else (cur_bid if cur_bid > 0 else 1.0)
-            tp = round(entry + tp_pips * pip, digits)
-            sl = round(entry - sl_pips * pip, digits)
-            risk_usd = round(sl_pips * dollar_per_pip, 2)
+            tp = 0.0
+            sl = 0.0
+            sl_pips = 0.0
+            tp_pips = 0.0
+            risk_usd = 0.0
+            target_usd = 0.0
 
         # Penyesuaian Lot dan Margin Bebas (Anti NO MONEY)
         specs = self.executor.get_symbol_trade_specs(sym, pip, entry)
@@ -1699,11 +1727,11 @@ class LiveBotEngine:
 
             # 4. Ambil data pasar real-time untuk sym
             sym_bid, sym_ask, sym_df = self._get_symbol_market_data(sym)
-            if sym_bid <= 0 or sym_ask <= 0 or sym_df is None or len(sym_df) < 15:
+            if sym_bid <= 0 or sym_ask <= 0 or sym_df is None or len(sym_df) < 21:
                 continue
 
-            # 5. Hitung sinyal kuantitatif aktif untuk simbol ini
-            sig = self._compute_active_signal(sym_df, symbol=sym, bid=sym_bid, ask=sym_ask)
+            # 5. Hitung sinyal kuantitatif aktif untuk simbol ini (Evaluasi hanya pada candle yang telah selesai tutup)
+            sig = self._compute_active_signal(sym_df, symbol=sym, bid=sym_bid, ask=sym_ask, closed_only=True)
             if not sig or sig.get("action") not in ("BUY", "SELL"):
                 if sym == self.symbol and sig:
                     t_meta = AVAILABLE_TECHNIQUES.get(sig.get("technique", "EMA_TREND"), AVAILABLE_TECHNIQUES.get("EMA_TREND", {}))

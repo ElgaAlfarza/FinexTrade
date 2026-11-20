@@ -344,7 +344,10 @@ def forecast(
 
     # Penentuan arah proyeksi ala profesional trader (terarah & berbasis data):
     bias_action_clean = str(bias_action or "").upper().strip()
-    if bias_action_clean == "BUY":
+    if not reliable and not bias_action_clean:
+        direction = "NETRAL"
+        drift_h = 0.0
+    elif bias_action_clean == "BUY":
         direction = "NAIK"
         drift_h = max(0.65 * sigma_h, abs(drift_h) if abs(drift_h) > 1e-6 else 0.75 * sigma_h)
     elif bias_action_clean == "SELL":

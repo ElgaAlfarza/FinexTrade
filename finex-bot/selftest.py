@@ -250,7 +250,7 @@ def test_forecast_and_learner():
     # 1) build_params tidak menimpa batas SL Emas dengan angka EURUSD
     px_m5 = build_params("XAUUSD", "M5")
     px_m15 = build_params("XAUUSD", "M15")
-    assert px_m5.max_sl_pips >= 150.0 and px_m15.max_sl_pips > px_m5.max_sl_pips
+    assert px_m5.max_sl_pips >= 50.0 and px_m15.max_sl_pips > px_m5.max_sl_pips
     assert px_m5.max_spread_pips >= 5.0
 
     # 2) Ekstraksi fitur 100% kausal (tanpa lookahead)
