@@ -1,131 +1,114 @@
-# Finex Bot: Algorithmic Trading Terminal (Tahap 1 s/d 4)
+# FinexTrade (finex-bot): Sistem Trading Algoritmik & Risk Controller
 
-Bot trading otomatis berbasis **Multi-Timeframe Market Structure**, **Fibonacci Retracement (Golden Pocket / OTE 50% - 78.6%)**, **Rejection Candle Action**, dilengkapi **Full-Stack Web Dashboard (FastAPI + WebSockets)**, **Engine Eksekusi Dual-Mode (MT5 Demo & Paper Trading Simulator)**, serta **Risk Management & Circuit Breaker**.
+Sistem trading algoritmik berbasis Python untuk MetaTrader 5 dan simulator Paper Trading lokal, dirancang dengan prinsip **fail-closed, transparansi kuantitatif, dan perlindungan modal**.
 
 ---
 
-## Ringkasan Status Arsitektur
+## ⚠️ Peringatan Risiko Resmi (Risk Disclaimer)
 
-| Komponen | Status | Keterangan |
+> **PERINGATAN RISIKO TINGGI:**
+> Trading valuta asing (Forex) dan komoditas (khususnya Gold / XAUUSD) menggunakan leverage melibatkan risiko kerugian yang sangat tinggi dan tidak cocok untuk semua investor. Tingginya leverage dapat merugikan Anda sama besarnya dengan menguntungkan Anda.
+> 
+> Perangkat lunak ini adalah **alat bantu teknis dan otomasi pengujian kuantitatif**, BUKAN penasihat keuangan (financial advisor) dan **TIDAK memberikan jaminan profit dalam bentuk apa pun**. Kinerja masa lalu atau hasil backtest tidak menjamin hasil di masa depan. Seluruh risiko finansial berada sepenuhnya pada tanggung jawab pengguna.
+
+---
+
+## 1. Arsitektur & Strategi yang Aktif
+
+- **Strategi Utama Live:** `EMA_TREND`
+  - **Indikator:** Exponential Moving Average (EMA 8 / 21 / 50 Ribbon), Average Directional Index (ADX 14, ambang batas $\ge 20$ anti-sideways), Relative Strength Index (RSI 14, filter exhaustion $32 - 68$).
+  - **Dynamic Retest Zone:** Pullback harga ke kantong dinamis antara EMA 8 dan EMA 21.
+  - **Konfirmasi Candle:** Rejection wick $\ge 35\%$ dari candle range atau candle impulsif searah tren dengan range minimal $0.45 \times \text{ATR}$.
+  - **Room-to-Move Filter:** Jarak minimal $1.0 \times \text{ATR}$ ke swing support/resistance 20 bar terakhir.
+- **Strategi Sekunder (Backtest):** Fibonacci Swing Structure & Break-Even (`strategy.py`).
+- **Platform Eksekusi:** MetaTrader 5 Desktop (IPC) & Paper Simulator lokal terisolasi.
+- **Default Keamanan:** Hanya aktif di mode **DEMO** dan **PAPER**. Order ke akun REAL diblokir secara fail-closed kecuali disetel `ALLOW_LIVE_REAL=1` secara eksplisit. Akun Cent (CNT) ditolak hingga didukung penuh.
+
+---
+
+## 2. Fitur Keamanan & Perlindungan Modal
+
+1. **Autentikasi & Proteksi API:**
+   - Token sesi acak kriptografis (`SESSION_TOKEN`) dihasilkan setiap server dimulai dan wajib disertakan via header `X-Session-Token` atau parameter query WebSocket.
+   - CORS dibatasi ketat ke `http://127.0.0.1:8000` dan `http://localhost:8000`. Request tanpa token ditolak `401 Unauthorized`.
+   - Rate limiting ketat untuk endpoint eksekusi order guna mencegah serangan spam/rebinding.
+2. **Circuit Breaker Harian Persisten (SQLite):**
+   - Kerugian harian dihitung dalam unit $R$ dan disimpan secara atomic ke SQLite `data/bot_state.db`.
+   - Akumulasi kerugian harian bertahan jika bot crash atau di-restart. Batas default: $-3.0R$.
+3. **Monotonic Profit Lock Guard:**
+   - Penguncian profit berjenjang non-decreasing yang memantau pergerakan harga running dan mengamankan cuan sebelum tergerus balik minus.
+4. **News Shield (Fail-Closed):**
+   - Kalender ekonomi otomatis menahan order sebelum dan sesudah rilis berita berdampak tinggi (High-Impact USD).
+   - Bila data kalender kedaluwarsa ($> 24$ jam) atau offline, sistem otomatis menahan entri demi keselamatan akun.
+5. **Ketiadaan AI di Jalur Eksekusi:**
+   - Seluruh logika sinyal dan manajemen risiko 100% deterministik tanpa ketergantungan keputusan ke LLM (Gemini).
+
+---
+
+## 3. Validasi Kuantitatif Out-of-Sample (Data Riil XAUUSD)
+
+Hasil evaluasi walk-forward jujur pada data historis broker Finex XAUUSD M5 (25.000 candle):
+
+| Parameter | In-Sample (70% Data Awal) | Out-of-Sample (30% Data Uji) |
 | :--- | :--- | :--- |
-| **Tahap 1: Koneksi MT5 & Data** | **Selesai** | `mt5_client.py`, `export_history.py` (ekspor rates BID ke CSV) |
-| **Tahap 2: Sinyal & Backtest** | **Selesai** | `strategy.py`, `backtest.py` (tanpa lookahead, interval 95% Wilson) |
-| **Tahap 3: Engine Eksekusi** | **Selesai** | `execution.py`, `live_engine.py` (MT5 + Paper Simulator, Auto Break-Even) |
-| **Tahap 4: Full-Stack Dashboard** | **Selesai** | `server.py`, `web/index.html` (Web terminal real-time, live chart, backtest studio) |
-| **Data Pasar Realistis** | **Tersedia** | `data/EURUSD_M5.csv`, `EURUSD_M1.csv`, `EURUSD_H1.csv`, `XAUUSD_M5.csv` |
+| **Rentang Waktu** | 11 Ags 2026 s/d 11 Okt 2026 | 11 Okt 2026 s/d 06 Nov 2026 |
+| **Jumlah Trade** | 208 trade | 72 trade |
+| **Win Rate** | **11.1%** (95% CI: 7.5% - 16.0%) | **4.2%** (95% CI: 1.4% - 11.5%) |
+| **Profit Factor** | 0.08 | 0.02 |
+| **Expectancy** | **-0.710 R** per trade | **-0.842 R** per trade |
+| **Max Drawdown** | -77.3% | -45.6% |
+
+### Analisis Kuantitatif Mengapa Hasil Scalping Menurun:
+Target scalping ketat ($5 / 5 pips) pada instrumen Emas (XAUUSD) tergerus oleh friksi biaya transaksi riil:
+- Spread rata-rata: 1.8 pip
+- Slippage estimasi: 0.5 pip
+- **Total Friksi Biaya: 2.3 pip (46% dari target profit 5 pip)**
+
+Mengejar target 5 pip dengan biaya 2.3 pip secara matematis menghasilkan ekspektasi negatif setelah spread dan slippage. Sistem **menghapus semua klaim tidak berdasar** (seperti "Akurasi 69.1%" atau "Target Win Rate 90%") dan menampilkan fakta statistik sebenarnya.
 
 ---
 
-## Cara Menjalankan
+## 4. Cara Menjalankan
 
-### 1. Buka Web Dashboard (Rekomendasi)
-Cukup jalankan:
+### Persyaratan:
+- Python 3.11+ (Disarankan Python 3.11 s/d 3.14)
+- Windows OS (untuk MetaTrader 5 IPC)
+
+### Instalasi Dependensi:
 ```bash
-python run_dashboard.py
-```
-atau klik dua kali file `start_terminal.bat`.
-Buka browser di: **[http://localhost:8000](http://localhost:8000)**
-
-**Fitur Dashboard:**
-- **Live Terminal & Positions**: Pantau Balance, Equity, Floating PnL, margin, batas rugi harian (circuit breaker), serta daftar posisi aktif dengan tombol **[BE]** (Break-Even) dan **[Close]** instan.
-- **Interactive Chart**: Grafik candlestick visual dengan overlay zona Fibonacci 50%-78.6%, Swing High/Low leg HTF, dan target TP (-0.27).
-- **Backtest Studio**: Jalankan backtest langsung dari UI pada dataset M1, M5, H1 atau Gold (XAUUSD), atur slider risiko %, SL mode, Auto BE, dan lihat kurva pertumbuhan ekuitas serta drawdown secara interaktif.
-- **Bot Control**: Tombol **START BOT**, **PAUSE**, dan **EMERGENCY KILL SWITCH** (likuidasi semua posisi seketika).
-
----
-
-### 2. Jalankan Backtest Lewat Terminal (CLI)
-```bash
-# Backtest EURUSD M5 dengan mode Structure SL
-python run_backtest.py --csv data/EURUSD_M5.csv --tf M5
-
-# Backtest dengan Auto Break-Even (+1R) dan SL Candle
-python run_backtest.py --csv data/EURUSD_M5.csv --tf M5 --sl-mode candle --be
-
-# Backtest XAUUSD (Emas M5)
-python run_backtest.py --csv data/XAUUSD_M5.csv --tf M5 --pip-size 0.1 --spread-pips 2.5
+pip install -r requirements.txt
 ```
 
----
-
-### 3. Koneksi ke MetaTrader 5 (Akun Demo Finex)
-1. Buka terminal MT5 Finex di Windows, pastikan tombol **Algo Trading** di toolbar atas aktif (berwarna hijau).
-2. Salin `.env.example` menjadi `.env` lalu isi kredensial akun demo:
-   ```ini
-   MT5_LOGIN=nomor_akun_demo
-   MT5_PASSWORD=kata_sandi_demo
-   MT5_SERVER=FinexBisnisSolusi-Demo
-   ```
-   *(Server alamat manual jika belum muncul di MT5: `prod-mt5-demo1.fnx.xmt.mx:443`)*
-3. Uji koneksi:
-   ```bash
-   python export_history.py --check
-   ```
-4. Ekspor data candle historis dari broker:
-   ```bash
-   python export_history.py --symbol EURUSD --tf M5 --from 2025-01-01 --out data/EURUSD_M5.csv
-   ```
-
-*Catatan Trader: Jika terminal MT5 sedang ditutup atau belum terhubung, sistem otomatis beralih ke **Paper Trading Simulator**, sehingga seluruh fitur bot dan dashboard tetap dapat diuji secara penuh.*
-
----
-
-### 4. Menjalankan Selftest Otomatis
-Untuk membuktikan bahwa seluruh mekanika risiko, formula lot, ketiadaan lookahead bias, dan simulator paper trading valid:
+### Menjalankan Server & Dashboard:
 ```bash
-python selftest.py
+python finex-bot/run_dashboard.py
+```
+Buka peramban di: **[http://127.0.0.1:8000](http://127.0.0.1:8000)**
+
+### Menjalankan Evaluasi Kuantitatif Out-of-Sample:
+```bash
+python finex-bot/run_oos_evaluation.py
+```
+
+### Menjalankan Selftest Arsitektur:
+```bash
+python finex-bot/selftest.py
+```
+
+### Menjalankan Seluruh Pengujian Otomatis (Pytest):
+```bash
+python -m pytest tests/ -v
 ```
 
 ---
 
-## Logika Strategi & Risk Management (Trader Blueprint)
+## 5. Struktur Berkas Utama
 
-1. **Multi-Timeframe Trend (HTF)**:
-   - Timeframe entry di-resample ke timeframe tren (M1 &rarr; M15, M5 &rarr; M30, H1 &rarr; H4).
-   - Menggunakan fractal swing pivots ($k=3$ bar).
-   - Tren terdefinisi: $HH + HL =$ **Uptrend (Bull)**; $LH + LL =$ **Downtrend (Bear)**.
-2. **Zona Retracement Fibonacci (Optimal Trade Entry)**:
-   - Ditarik dari leg impuls terakhir.
-   - Zona masuk: level **50.0% s/d 78.6%**.
-3. **Pemicu Entry (Rejection Price Action)**:
-   - Candle konfirmasi di timeframe entry harus menyentuh zona dan membentuk sumbu penolakan (wick ratio $\ge 50\%$) searah tren.
-4. **Filter Moving Average (opsional, bawaan aktif untuk XAUUSD)**:
-   - MA dihitung di timeframe tren (HTF) dari candle yang SUDAH tertutup (tanpa lookahead).
-   - Parameter di `config.py`: `use_ma_filter`, `ma_type` (SMA/EMA), `ma_fast`, `ma_slow`, `ma_mode`.
-   - Mode: `price_slow` (buy jika close HTF > MA lambat), `cross` (MA cepat > MA lambat), `price_both` (close di atas kedua MA).
-   - Filter hanya MENGURANGI sinyal; tidak pernah menambah. Angka bawaan (EMA 21/50) adalah hipotesis awal, BUKAN setting dari video TikTok (setting video tidak tersedia). Uji di data XAUUSD asli.
-   - CLI: `python run_backtest.py --csv data/XAUUSD_M5.csv --tf M5 --pip-size 0.1 --spread-pips 2.5 --be --ma --ma-mode price_both`
-   - Dashboard: Backtest Studio punya kotak centang dan pilihan MA; chart menggambar garis MA dan status MA (BUY_ONLY / SELL_ONLY / NETRAL).
-5. **Proteksi & Manajemen Risiko**:
-   - **Risiko per trade**: Default $1\%$ dari ekuitas (dihitung dinamis via `risk.py`).
-   - **Circuit Breaker Harian**: Jika total kerugian harian mencapai $-3R$, bot berhenti trading hari itu.
-   - **Auto Break-Even**: Saat posisi mengambang $+1R$, Stop Loss digeser otomatis ke level entry $+ 0.5$ pip buffer untuk mengunci risiko.
-   - **Target TP**: Extension $-0.27$ dari leg impuls, dengan syarat minimum Reward-to-Risk $1 : 1.5$.
-
-
----
-
-## Mode Latihan (khusus akun DEMO / PAPER)
-
-Untuk mengumpulkan data belajar lebih cepat, bot bisa entry jauh lebih sering walau tidak ada sinyal Fibonacci.
-Aktifkan lewat panel **Mode Latihan** di dashboard (atau `POST /api/bot/explore`).
-
-- **Laju entry:** setiap N candle tertutup (`explore_every_bars`). Di timeframe M1, N=1 berarti sekitar 1 entry per menit, N=5 berarti per 5 menit. Pilih timeframe M1 di dashboard.
-- **Arah:** mengikuti tren HTF (dan MA bila aktif). Jika ranging, memakai arah candle terakhir. Arah tren dan MA yang bertentangan membuat entry dilewati.
-- **SL/TP:** SL = 1.5 x ATR(14), dijepit ke batas SL simbol; TP = RR 1.5 x jarak SL.
-- **Tidak ada filter sesi dan tidak ada filter model belajar**, supaya data mencakup setup baik dan buruk.
-- **Model terpisah:** entry latihan dipelajari oleh `learner_state_explore.json`, tidak mencemari model strategi utama.
-- **Pengaman yang tetap aktif:** spread guard, batas jarak SL, lot berdasarkan risiko 1%, maksimal posisi terbuka (default 3), dan circuit breaker harian (default -10R).
-- **Guard akun:** ditolak otomatis jika MT5 terdeteksi akun REAL.
-- Entry latihan bukan strategi. Hasilnya tidak boleh dibaca sebagai profit strategi.
-
-## Perbaikan Circuit Breaker
-
-Sebelumnya penghitung R harian (`daily_r_pnl`) tidak pernah diperbarui sehingga batas -3R tidak pernah aktif di live. Sekarang setiap trade yang tutup dicatat ke R harian.
-
----
-
-## Catatan Penting (Jujur)
-
-- Semua file di `data/` dibuat oleh `generate_sample_data.py` (random walk sintetis), BUKAN data pasar asli. Hasil backtest di sana hanya membuktikan kode berjalan, bukan bahwa strategi menguntungkan. Ekspor data asli dengan `export_history.py` sebelum menilai strategi atau filter MA.
-- Zona Fibonacci kini 50% sampai 78.6% sesuai dokumentasi (sebelumnya `fib_bottom` di kode bernilai 0.886).
+- `finex-bot/server.py`: API Server FastAPI, WebSocket telemetry, autentikasi sesi token, CORS guard, dan rate limiter.
+- `finex-bot/live_engine.py`: Mesin utama live bot trading dengan strategi `EMA_TREND`, News Shield terintegrasi, dan fail-closed guard.
+- `finex-bot/execution.py`: Engine eksekusi order (`MT5Executor` dan `PaperExecutor` thread-safe), Circuit Breaker persisten SQLite, dan Monotonic Profit Lock.
+- `finex-bot/strategy.py`: Generator sinyal deterministik `EMA_TREND` dan Fibonacci.
+- `finex-bot/backtest.py`: Engine backtest konservatif dengan pemodelan spread, slippage, Wilson 95% CI, dan walk-forward splitting.
+- `finex-bot/migrate_trades.py`: Alat sanitasi CSV 12-kolom dan migrasi ke SQLite table `trades`.
+- `finex-bot/data/bot_state.db`: Database SQLite untuk state circuit breaker dan seluruh jurnal trade terstruktur.
+- `tests/`: Rangkaian unit test komprehensif fase 0 hingga 5 (33 pengujian otomatis).
