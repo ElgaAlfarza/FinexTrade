@@ -1,0 +1,41 @@
+# Environment and Secrets
+.env
+*.env
+!.env.example
+finex-bot/.env
+accounts_vault.json
+*/accounts_vault.json
+**/accounts_vault.json
+
+# Databases and State
+*.db
+*.sqlite
+*.sqlite3
+learner_state*.json
+**/learner_state*.json
+session_reset.json
+**/session_reset.json
+
+# Trade Data & Logs
+*.csv
+**/*.csv
+*.jsonl
+**/*.jsonl
+trade_journal.json
+**/trade_journal.json
+scratch_telemetry.json
+*.log
+
+# Scratch and Archive
+scratch/
+**/scratch/
+archive/
+scratch_eval.js
+scratch_test_node.js
+
+# Python Cache
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/

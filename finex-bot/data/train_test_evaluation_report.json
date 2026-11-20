@@ -1,0 +1,42 @@
+{
+  "status": "VALIDATED",
+  "sample_size": 200000,
+  "split": {
+    "train_ratio": 0.9,
+    "test_ratio": 0.1,
+    "train_bars": 180000,
+    "test_bars": 20001,
+    "train_period": "2023-02-22 20:30:00 s/d 2025-09-08 16:25:00",
+    "test_period": "2025-09-08 16:30:00 s/d 2026-01-30 23:55:00"
+  },
+  "train_results": {
+    "total_trades": 34643,
+    "wins": 13585,
+    "win_rate": 39.2
+  },
+  "test_results": {
+    "total_raw_trades": 3648,
+    "raw_win_rate": 40.1,
+    "ai_filtered_trades": 1265,
+    "ai_filtered_wins": 499,
+    "ai_win_rate": 39.4,
+    "accuracy_improvement": -0.6
+  },
+  "learner_stats": {
+    "samples": 34643,
+    "win_rate": 39.2,
+    "active": true,
+    "threshold": 0.45
+  },
+  "weights": {
+    "trend": 0.5863,
+    "zone_depth": 0.4648,
+    "wick": 0.1407,
+    "rr": -0.0,
+    "sl_atr": 0.3411,
+    "hour_sin": -0.0059,
+    "hour_cos": -1.1672,
+    "spread": 0.0
+  },
+  "duration_sec": 79.48
+}
