@@ -144,7 +144,10 @@ class LiveBotEngine:
 
         self.params = params or self._build_params()
         self.executor: IExecutor = self._init_executor()
-        self.order_manager = OrderManager(self.executor, self.params)
+        db_path = os.environ.get("FINEX_BOT_STATE_DB")
+        if not db_path:
+            db_path = ":memory:" if self.use_paper else None
+        self.order_manager = OrderManager(self.executor, self.params, db_path=db_path)
 
         self.is_running: bool = False
         self.is_paused: bool = False

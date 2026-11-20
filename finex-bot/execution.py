@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -725,6 +726,21 @@ class MT5Executor(IExecutor):
 
     def open_trade(self, symbol: str, side: str, lots: float, sl: float, tp: float, risk_pips: float, comment: str = "") -> Optional[Position]:
         with self._lock:
+            # Double-layer Real Account & Cent Account Guard (P0-3)
+            acc_info = self.mt5.account_info()
+            if acc_info is not None:
+                is_demo = (acc_info.trade_mode == getattr(self.mt5, "ACCOUNT_TRADE_MODE_DEMO", 0))
+                allow_real = (os.environ.get("ALLOW_LIVE_REAL", "0") == "1")
+                if not is_demo and not allow_real:
+                    self.last_order_error = "Order DITOLAK: Akun REAL diblokir (terdeteksi tanpa izin eksplisit ALLOW_LIVE_REAL=1)."
+                    logger.critical(f"[MT5] {self.last_order_error}")
+                    return None
+                curr = str(getattr(acc_info, "currency", "USD") or "USD").upper()
+                if curr in ("CNT", "USDC"):
+                    self.last_order_error = f"Order DITOLAK: Akun Cent ({curr}) belum didukung untuk eksekusi live."
+                    logger.critical(f"[MT5] {self.last_order_error}")
+                    return None
+
             if not self.mt5.symbol_select(symbol, True):
                 self.last_order_error = f"Simbol {symbol} tidak tersedia di server MT5 ini."
                 logger.error(self.last_order_error)
@@ -1076,7 +1092,7 @@ class MT5Executor(IExecutor):
 class OrderManager:
     """Manajer order terpusat yang mengatur aturan risiko, BE, dan eksekusi."""
 
-    def __init__(self, executor: IExecutor, params: StrategyParams):
+    def __init__(self, executor: IExecutor, params: StrategyParams, db_path: Optional[str] = None):
         self.executor = executor
         self.params = params
         self.daily_r_pnl: float = 0.0
@@ -1085,7 +1101,67 @@ class OrderManager:
         self.logs: List[dict] = []
         self.risk_usd_by_ticket: dict = {}   # ticket -> risiko USD saat entry (untuk hitung R harian)
         self._peak_pnl_by_ticket: dict = {}  # ticket -> float (puncak floating pnl untuk trailing stop)
+        self._locked_profit_by_ticket: dict = {} # ticket -> float (profit terkunci berjenjang non-decreasing)
         self.market_bias_getter: Optional[Any] = None # Callback evaluasi arah pasar by data M1 real-time
+        self._db_path = db_path or os.path.join(os.path.dirname(__file__), "data", "bot_state.db")
+        self._init_state_db()
+        self._restore_state_from_db()
+
+    def _init_state_db(self) -> None:
+        """Inisialisasi tabel SQLite untuk menyimpan state circuit breaker dan risiko tiket aktif."""
+        try:
+            os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
+            with sqlite3.connect(self._db_path) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS daily_circuit_breaker (
+                        date TEXT PRIMARY KEY,
+                        daily_r REAL,
+                        realized_pnl REAL,
+                        updated_at TEXT
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS risk_registry (
+                        ticket INTEGER PRIMARY KEY,
+                        risk_usd REAL,
+                        symbol TEXT,
+                        lots REAL,
+                        open_time TEXT
+                    )
+                """)
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"Gagal inisialisasi state database: {e}")
+
+    def _restore_state_from_db(self) -> None:
+        """Pulihkan akumulasi R harian dan risiko tiket yang masih aktif dari database saat bot restart."""
+        try:
+            today_str = datetime.now(timezone.utc).date().isoformat()
+            with sqlite3.connect(self._db_path) as conn:
+                cur = conn.execute("SELECT daily_r FROM daily_circuit_breaker WHERE date = ?", (today_str,))
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    self.daily_r_pnl = float(row[0])
+                    self.log(f"Circuit Breaker pulih dari DB: Akumulasi R harian ({today_str}) = {self.daily_r_pnl:+.2f}R", "INFO")
+                cur = conn.execute("SELECT ticket, risk_usd FROM risk_registry")
+                for tk, r_usd in cur.fetchall():
+                    self.risk_usd_by_ticket[int(tk)] = float(r_usd)
+        except Exception as e:
+            logger.debug(f"Gagal memuat state dari database: {e}")
+
+    def _save_ticket_risk(self, ticket: int, risk_usd: float, symbol: str, lots: float) -> None:
+        """Simpan risiko USD per tiket ke memori dan SQLite agar selamat saat restart."""
+        self.risk_usd_by_ticket[ticket] = float(risk_usd)
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                now_str = datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    "INSERT OR REPLACE INTO risk_registry (ticket, risk_usd, symbol, lots, open_time) VALUES (?, ?, ?, ?, ?)",
+                    (int(ticket), float(risk_usd), str(symbol), float(lots), now_str)
+                )
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"Gagal simpan risk tiket #{ticket}: {e}")
 
     def log(self, message: str, level: str = "INFO"):
         entry = {
@@ -1103,7 +1179,20 @@ class OrderManager:
         if today != self.last_trade_day:
             self.daily_r_pnl = 0.0
             self.last_trade_day = today
+            self._locked_profit_by_ticket.clear()
+            self._peak_pnl_by_ticket.clear()
             self.log(f"Hari baru ({today}): Counter rugi harian direset ke 0R.", "INFO")
+            try:
+                today_str = today.isoformat()
+                now_iso = datetime.now(timezone.utc).isoformat()
+                with sqlite3.connect(self._db_path) as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO daily_circuit_breaker (date, daily_r, realized_pnl, updated_at) VALUES (?, ?, ?, ?)",
+                        (today_str, 0.0, 0.0, now_iso)
+                    )
+                    conn.commit()
+            except Exception:
+                pass
 
     def evaluate_and_execute(self, symbol: str, side: int, sl: float, tp: float, current_price: float, spread_pips: float) -> Optional[Position]:
         self.reset_daily_if_new_day()
@@ -1189,7 +1278,7 @@ class OrderManager:
 
         if pos:
             self.log(f"ENTRY SUKSES: {side_str} {pos.lots} lot @ {current_price:.{digits}f} | SL: {sl:.{digits}f} | TP: {tp:.{digits}f} | Risk: {risk_pips:.1f} pips", "SIGNAL")
-            self.risk_usd_by_ticket[pos.ticket] = pos.lots * risk_pips * pip_val
+            self._save_ticket_risk(pos.ticket, pos.lots * risk_pips * pip_val, symbol, pos.lots)
             if not explore:
                 self.cooldown_remaining = self.params.cooldown_bars
         return pos
@@ -1243,22 +1332,38 @@ class OrderManager:
         pip_val = estimate_pip_value(symbol, pip)
         risk_pips = max(2.5, abs(current_price - sl) / pip) if pip > 0 else 10.0
 
-        # 4. Tentukan Ukuran Lot: Mengikuti lot yang diatur pengguna (default 0.1 lot konsisten)
-        if lot is None or lot <= 0:
-            lot = float(getattr(self.params, "scalping_lot", 0.1) or 0.1)
-
         # Cek kondisi saldo dan margin akun agar beradaptasi otomatis
         acc = self.executor.get_account_info()
         equity = float(acc.get("equity", 100.0) or 100.0)
         free_margin = float(acc.get("free_margin", equity) or equity)
 
+        # 4. Tentukan Ukuran Lot: Dinamis berdasarkan risk_pct atau lot tetap yang diatur pengguna
+        user_fixed_lot = float(getattr(self.params, "scalping_lot", 0.0) or 0.0)
+        risk_pct = float(getattr(self.params, "risk_pct", 1.0) or 1.0)
+        if lot is not None and float(lot) > 0:
+            target_lot = float(lot)
+        elif user_fixed_lot > 0:
+            target_lot = user_fixed_lot
+        else:
+            target_lot = lot_size(
+                equity=equity,
+                risk_pct=risk_pct,
+                sl_pips=risk_pips,
+                pip_value_per_lot=pip_val,
+                min_lot=min_l,
+                lot_step=step_l,
+                max_lot=max_l,
+            )
+
         # Validasi ukuran lot terhadap batasan broker (tanpa memaksakan secara diam-diam)
-        if lot is None or float(lot) <= 0 or float(lot) < min_l:
-            self.log(f"LOT FILTER: Ukuran lot ({lot}) di bawah batas minimum broker ({min_l}). Order dibatalkan.", "WARNING")
+        if target_lot is None or float(target_lot) <= 0 or float(target_lot) < min_l:
+            self.log(f"LOT FILTER: Ukuran lot ({target_lot}) di bawah batas minimum broker ({min_l}) atau risiko tidak mencukupi. Order dibatalkan.", "WARNING")
             return None
         if step_l > 0:
-            lot = round(math.floor(float(lot) / step_l + 1e-9) * step_l, 4)
-        lot = min(max_l, lot)
+            lot = round(math.floor(float(target_lot) / step_l + 1e-9) * step_l, 4)
+        else:
+            lot = target_lot
+        lot = min(max_l, max(min_l, lot))
 
         side_str = "BUY" if side == 1 else "SELL"
 
@@ -1293,27 +1398,51 @@ class OrderManager:
                 f"🚀 ENTRY SCALPING [{technique}] {side_str} {pos.lots} lot @ {current_price:.{digits}f} | TP: {tp:.{digits}f} (Target +${target_usd:.2f}) | SL: {sl:.{digits}f}",
                 "SIGNAL",
             )
-            self.risk_usd_by_ticket[pos.ticket] = pos.lots * risk_pips * pip_val
+            risk_usd = pos.lots * risk_pips * pip_val
+            self._save_ticket_risk(pos.ticket, risk_usd, symbol, pos.lots)
         return pos
 
     def register_closed_trade(self, t: dict) -> None:
-        """Catat hasil trade yang sudah tertutup ke penghitung R harian (dasar circuit breaker)."""
+        """Catat hasil trade yang sudah tertutup ke penghitung R harian (dasar circuit breaker persisten)."""
         tk = t.get("ticket")
-        risk_usd = self.risk_usd_by_ticket.pop(tk, None)
+        risk_usd = self.risk_usd_by_ticket.pop(tk, None) if tk else None
         if risk_usd is None:
             return
+
+        if tk:
+            try:
+                with sqlite3.connect(self._db_path) as conn:
+                    conn.execute("DELETE FROM risk_registry WHERE ticket = ?", (int(tk),))
+                    conn.commit()
+            except Exception:
+                pass
+
         r = t.get("r")
         if r is None:
             r = float(t.get("pnl", 0.0)) / risk_usd if risk_usd > 0 else 0.0
+
         self.reset_daily_if_new_day()
         self.daily_r_pnl += float(r)
+
+        try:
+            today_str = datetime.now(timezone.utc).date().isoformat()
+            now_iso = datetime.now(timezone.utc).isoformat()
+            with sqlite3.connect(self._db_path) as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO daily_circuit_breaker (date, daily_r, realized_pnl, updated_at) VALUES (?, ?, ?, ?)",
+                    (today_str, self.daily_r_pnl, float(t.get("pnl", 0.0)), now_iso)
+                )
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"Gagal simpan daily R ke DB: {e}")
+
         self.log(f"Trade #{tk} tutup: {float(r):+.2f}R | total hari ini {self.daily_r_pnl:+.2f}R", "INFO")
 
     def manage_active_positions(self) -> None:
         """
         Monitor proteksi profit dinamis & eksekusi anti-balik minus:
         1. Continuous Peak Tracking: pantau puncak profit tertinggi tiap detik.
-        2. Dynamic Trailing Locking: kunci profit berjenjang (35% - 70% dari puncak).
+        2. Dynamic Trailing Locking: kunci profit berjenjang secara monotonik (tidak pernah turun).
         3. Break-Even Activation: kunci BE + fees jika harga bergerak searah target.
         4. Emergency Catastrophic Cap (-$5.00): batas pengaman rugi darurat.
         """
@@ -1322,21 +1451,19 @@ class OrderManager:
         configured_loss_usd = float(getattr(self.params, "target_loss_usd", 5.0) or 5.0)
         max_loss_usd = min(configured_loss_usd, round(target_usd * 1.0, 2)) if target_usd > 0 else configured_loss_usd
 
-        # Bersihkan tiket yang sudah tertutup dari memori puncak profit
+        # Bersihkan tiket yang sudah tertutup dari memori puncak profit & profit lock
         active_tickets = set(p.ticket for p in positions)
         for t in list(self._peak_pnl_by_ticket.keys()):
             if t not in active_tickets:
                 self._peak_pnl_by_ticket.pop(t, None)
+        for t in list(self._locked_profit_by_ticket.keys()):
+            if t not in active_tickets:
+                self._locked_profit_by_ticket.pop(t, None)
 
         for p in positions:
             digits = symbol_decimals(p.symbol)
             pip = get_symbol_pip_size(p.symbol)
             is_gold = "XAU" in p.symbol.upper() or "GOLD" in p.symbol.upper()
-            is_macro_sniper = (
-                "CPI_SNIPER" in str(getattr(p, "comment", "")).upper() or
-                "PPI_SNIPER" in str(getattr(p, "comment", "")).upper() or
-                getattr(p, "technique", "") in ("CPI_SNIPER", "PPI_SNIPER")
-            )
 
             # 0. CONTINUOUS PEAK TRACKING: Catat selalu puncak floating profit tertinggi
             prev_peak = self._peak_pnl_by_ticket.get(p.ticket, 0.0)
@@ -1349,20 +1476,18 @@ class OrderManager:
             if pip > 0:
                 cur_pips = (p.current_price - p.open_price) / pip if p.side == "BUY" else (p.open_price - p.current_price) / pip
 
-            # 1. SMART DYNAMIC PROFIT TRAILING
-            locked_profit_usd = 0.0
-            if not is_macro_sniper:
-                if peak >= 5.00:
-                    locked_profit_usd = max(3.50, round(peak * 0.70, 2))
-                elif peak >= 2.50:
-                    locked_profit_usd = max(1.50, round(peak - 1.00, 2))
-                elif peak >= 1.00:
-                    locked_profit_usd = 0.35
-            else:
-                if peak >= 6.00:
-                    locked_profit_usd = max(4.50, round(peak * 0.80, 2))
-                elif peak >= 3.50:
-                    locked_profit_usd = max(2.50, round(peak - 1.00, 2))
+            # 1. SMART DYNAMIC PROFIT TRAILING (Strictly Monotonic Non-Decreasing)
+            new_locked = 0.0
+            if peak >= 5.00:
+                new_locked = round(3.50 + (peak - 5.00) * 0.70, 2)
+            elif peak >= 2.50:
+                new_locked = round(1.50 + (peak - 2.50) * 0.80, 2)
+            elif peak >= 1.00:
+                new_locked = 0.35
+
+            prev_locked = self._locked_profit_by_ticket.get(p.ticket, 0.0)
+            locked_profit_usd = max(prev_locked, new_locked)
+            self._locked_profit_by_ticket[p.ticket] = locked_profit_usd
 
             # 2. DUAL-LAYER ENFORCEMENT:
             # LAYER A: UPDATE STOP LOSS DI BROKER MT5 SECARA MERAYAP (TRAILING SL BROKER)
