@@ -4470,10 +4470,19 @@ function symDecimals(sym) {
         };
         const res = await fetch('/api/trades/quick-order', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Bot-Token': window.__BOT_AUTH_TOKEN__ || ''
+          },
           body: JSON.stringify(body)
         });
-        const d = await res.json();
+        let d = {};
+        const text = await res.text();
+        try {
+          d = JSON.parse(text);
+        } catch (_) {
+          d = { detail: text || `HTTP ${res.status}` };
+        }
         if (res.ok && d.success) {
           playChime('order');
           showToast(`🚀 Order ${body.side} ${body.symbol} Berhasil Terbuka! Target: ${latestSignal.target_usd ? '+$' + latestSignal.target_usd : '+$5.00'}`, 'order');
@@ -6554,10 +6563,19 @@ function symDecimals(sym) {
       try {
         const res = await fetch('/api/trades/quick-order', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Bot-Token': window.__BOT_AUTH_TOKEN__ || ''
+          },
           body: JSON.stringify({ symbol: targetSym, side: s, lots: lot })
         });
-        const data = await res.json();
+        let data = {};
+        const text = await res.text();
+        try {
+          data = JSON.parse(text);
+        } catch (_) {
+          data = { detail: text || `HTTP ${res.status}` };
+        }
         if (!res.ok || !data.success) {
           const errMsg = data.detail || data.message || 'Gagal eksekusi order';
           showToast(`⚠️ Order Ditolak: ${errMsg}`, 'warn');
@@ -6577,8 +6595,17 @@ function symDecimals(sym) {
     async function closeTrade(ticket) {
       if (!confirm(`Tutup posisi #${ticket} sekarang?`)) return;
       try {
-        const res = await fetch(`/api/trades/close/${ticket}`, { method: 'POST' });
-        const data = await res.json();
+        const res = await fetch(`/api/trades/close/${ticket}`, {
+          method: 'POST',
+          headers: { 'X-Bot-Token': window.__BOT_AUTH_TOKEN__ || '' }
+        });
+        let data = {};
+        const text = await res.text();
+        try {
+          data = JSON.parse(text);
+        } catch (_) {
+          data = { detail: text || `HTTP ${res.status}` };
+        }
         if (!res.ok || !data.success) {
           const msg = data.detail || data.message || 'Gagal menutup posisi di MT5.';
           showToast(msg, 'warning');
@@ -6593,8 +6620,17 @@ function symDecimals(sym) {
     async function closeAllTrades() {
       if (!confirm('Tutup semua posisi aktif sekarang?')) return;
       try {
-        const res = await fetch('/api/trades/close-all', { method: 'POST' });
-        const data = await res.json();
+        const res = await fetch('/api/trades/close-all', {
+          method: 'POST',
+          headers: { 'X-Bot-Token': window.__BOT_AUTH_TOKEN__ || '' }
+        });
+        let data = {};
+        const text = await res.text();
+        try {
+          data = JSON.parse(text);
+        } catch (_) {
+          data = { message: text || `HTTP ${res.status}` };
+        }
         alert(data.message || 'Semua posisi ditutup.');
       } catch (e) {
         alert('Gagal: ' + e);

@@ -10,7 +10,8 @@ import json
 import logging
 import os
 import secrets
-from typing import List, Optional
+import time
+from typing import Dict, List, Optional
 
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
@@ -79,6 +80,15 @@ async def security_middleware(request: Request, call_next):
             return JSONResponse(status_code=401, content={"detail": "Unauthorized: Sesi tidak valid atau token tidak disertakan"})
 
     return await call_next(request)
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.exception(f"Unhandled error on {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"success": False, "detail": f"Terjadi kesalahan server internal: {str(exc)}"}
+    )
 
 # Inisialisasi engine bot di background (Fokus default: XAUUSD Gold Spot)
 engine = LiveBotEngine(symbol="XAUUSD", timeframe="M5", use_paper=True)
@@ -476,6 +486,8 @@ class QuickOrderRequest(BaseModel):
     symbol: Optional[str] = "XAUUSD"
     side: str = "BUY"  # "BUY" atau "SELL"
     lots: float = 0.01
+    sl: Optional[float] = None
+    tp: Optional[float] = None
 
 
 _last_quick_order_time = 0.0
@@ -524,6 +536,10 @@ def quick_order(req: QuickOrderRequest):
     tp_dist = sl_pips_default * 1.5 * pip
     sl = round(cur_price - sl_dist if side == "BUY" else cur_price + sl_dist, decimals)
     tp = round(cur_price + tp_dist if side == "BUY" else cur_price - tp_dist, decimals)
+    if req.sl is not None and float(req.sl) > 0:
+        sl = round(float(req.sl), decimals)
+    if req.tp is not None and float(req.tp) > 0:
+        tp = round(float(req.tp), decimals)
 
     # Validasi dan adaptasi lot otomatis berdasarkan margin bebas akun
     acc = engine.executor.get_account_info()
