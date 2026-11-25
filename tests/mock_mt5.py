@@ -7,7 +7,7 @@ import numpy as np
 
 
 class MockAccountInfo:
-    def __init__(self, login=61950031, server="FinexBisnisSolusi-Demo", currency="USD",
+    def __init__(self, login=12345678, server="FinexBisnisSolusi-Demo", currency="USD",
                  balance=10000.0, equity=10000.0, margin_free=10000.0, trade_mode=0,
                  leverage=500, trade_allowed=True, trade_expert=True):
         self.login = login

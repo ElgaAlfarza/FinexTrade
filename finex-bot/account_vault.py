@@ -24,8 +24,8 @@ DEFAULT_VAULT = {
             "id": "finex_demo",
             "name": "Finex Demo (Utama)",
             "broker": "Finex Bisnis Solusi",
-            "login": 61950031,
-            "password": "", # Tersimpan di session MT5 Finex
+            "login": 12345678,
+            "password": "", # Tersimpan di session MT5 Finex atau .env
             "server": "FinexBisnisSolusi-Demo",
             "account_type": "demo",
             "currency": "USD",
@@ -36,9 +36,9 @@ DEFAULT_VAULT = {
         },
         {
             "id": "markets4you_cent",
-            "name": "Markets4you Cent (Real MT5)",
+            "name": "Markets4you Cent (Sample MT5)",
             "broker": "Markets4you / E-Global Trade",
-            "login": 21060799,
+            "login": 87654321,
             "password": "",
             "investor_password": "",
             "server": "EGlobalTrade-Classic",

@@ -6,6 +6,8 @@ finex-bot/.env
 accounts_vault.json
 */accounts_vault.json
 **/accounts_vault.json
+.env.local
+.env.*.local
 
 # Databases and State
 *.db
@@ -28,14 +30,29 @@ trade_journal.json
 scratch_telemetry.json
 *.log
 
-# Scratch and Archive
+# Scratch, Backups, and Internal Docs
 scratch/
 **/scratch/
 archive/
 scratch_eval.js
 scratch_test_node.js
+*.before_fix
+*.santorini
+user_prompt_full.txt
 
-# Python Cache
+# Editor & OS Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.bak
+*.tmp
+*.swp
+
+# Python VirtualEnv & Cache
+venv/
+.venv/
+env/
 __pycache__/
 **/__pycache__/
 *.py[cod]
